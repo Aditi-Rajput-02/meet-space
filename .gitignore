@@ -4,19 +4,20 @@ node_modules/
 .pnp.js
 
 # ─── Environment Variables ────────────────────────────────────────────────────
+# .env files contain secrets — set them manually on the server
+# Use .env.example as a template
 .env
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
-backend/.env
 frontend/.env
+backend/.env
 
 # ─── Build Output ─────────────────────────────────────────────────────────────
+# frontend/dist is built by the deploy script on the server — don't commit it
 frontend/dist/
 frontend/build/
-dist/
-build/
 
 # ─── Logs ─────────────────────────────────────────────────────────────────────
 logs/
@@ -59,3 +60,6 @@ frontend/.vite/
 *.tgz
 *.zip
 .cache/
+
+# ─── Old backend/ folder (no longer used — files moved to root) ───────────────
+# Keep backend/ in git for reference but the root-level files are what's deployed
