@@ -1,0 +1,73 @@
+.participants-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+.participants-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.participant-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  transition: background 0.2s;
+}
+.participant-item:hover { background: rgba(255,255,255,0.04); }
+.participant-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #6c63ff, #ff6584);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: white;
+  flex-shrink: 0;
+}
+.participant-info { flex: 1; min-width: 0; }
+.participant-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.875rem;
+  color: rgba(255,255,255,0.9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.you-badge {
+  font-size: 0.65rem;
+  background: rgba(108,99,255,0.2);
+  border: 1px solid rgba(108,99,255,0.3);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: #a89fff;
+}
+.participant-status { display: flex; gap: 4px; margin-top: 3px; flex-wrap: wrap; }
+.status-chip {
+  font-size: 0.65rem;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.status-chip.screen { background: rgba(67,233,123,0.1); color: #43e97b; }
+.status-chip.hand { background: rgba(255,152,0,0.1); color: #ff9800; }
+.participant-indicators { display: flex; gap: 4px; }
+.p-indicator { font-size: 0.85rem; }
+.p-indicator.muted { filter: drop-shadow(0 0 4px rgba(244,67,54,0.5)); }
+.participants-empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: rgba(255,255,255,0.3);
+  font-size: 0.82rem;
+  line-height: 1.8;
+}
