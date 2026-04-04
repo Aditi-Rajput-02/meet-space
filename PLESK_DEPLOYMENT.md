@@ -56,20 +56,19 @@ LIVE ✅
 ### 2. Configure Post-Deployment Script
 
 In Plesk Git settings for the repo:
-- Find **Additional deploy actions** (or **Post-deployment script**)
-- Enter this command:
-  ```bash
-  bash .plesk-deploy
-  ```
-  Or if bash isn't available, use:
-  ```bash
-  node -e "
-    const {execSync}=require('child_process');
-    execSync('npm install', {cwd:'frontend', stdio:'inherit'});
-    execSync('npm run build', {cwd:'frontend', stdio:'inherit'});
-    execSync('npm install --omit=dev', {stdio:'inherit'});
-  "
-  ```
+1. Click **Edit** on the repository
+2. Find **Additional deployment actions**
+3. **Remove everything** inside it and replace with exactly:
+   ```
+   npm install
+   cd frontend
+   npm install
+   npm run build
+   cd ..
+   ```
+4. Click **Save**
+
+> ✅ This installs backend deps, then builds the React frontend on every git push.
 
 ### 3. Create `.env` on the Server
 
