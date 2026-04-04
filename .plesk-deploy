@@ -1,34 +1,19 @@
-#!/bin/bash
-# .plesk-deploy — Plesk Git post-deployment script (Linux/bash version)
-# For Windows Plesk, use the commands in PLESK_DEPLOYMENT.md instead
-
-set -e
-
-echo "🚀 MeetSpace Post-Deployment Script Starting..."
-echo "   Directory: $(pwd)"
-
-# ─── Step 1: Install frontend dependencies ────────────────────────────────────
-echo "📦 Installing frontend dependencies..."
+echo Installing frontend dependencies...
 cd frontend
 
-# Create frontend/.env if it doesn't exist
-if [ ! -f ".env" ]; then
-  echo "VITE_SOCKET_URL=https://meetspace.swiftcampus.com" > .env
-  echo "✅ Created frontend/.env"
-fi
+IF NOT EXIST .env (
+  echo VITE_SOCKET_URL=https://meetspace.swiftcampus.com > .env
+  echo Created frontend .env
+)
 
 npm install
-echo "✅ Frontend dependencies installed"
 
-# ─── Step 2: Build frontend ───────────────────────────────────────────────────
-echo "🔨 Building frontend for production..."
+echo Building frontend...
 npm run build
-echo "✅ Frontend built → frontend/dist/"
 
-# ─── Step 3: Install backend (root) dependencies ─────────────────────────────
-echo "📦 Installing backend dependencies..."
 cd ..
-npm install --omit=dev
-echo "✅ Backend dependencies installed"
 
-echo "✅ Deployment complete!"
+echo Installing backend dependencies...
+npm install --omit=dev
+
+echo Deployment complete!
