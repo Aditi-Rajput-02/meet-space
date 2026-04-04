@@ -1,25 +1,15 @@
 #!/bin/bash
-# .plesk-deploy — Plesk Git post-deployment script
-# This runs automatically after every git pull in Plesk
-# Configure in Plesk: Git → Deployment → Additional deploy actions
+# .plesk-deploy — Plesk Git post-deployment script (Linux/bash version)
+# For Windows Plesk, use the commands in PLESK_DEPLOYMENT.md instead
 
-set -e  # Exit on any error
+set -e
 
 echo "🚀 MeetSpace Post-Deployment Script Starting..."
 echo "   Directory: $(pwd)"
-echo "   Node: $(node --version)"
-echo "   NPM: $(npm --version)"
 
 # ─── Step 1: Install frontend dependencies ────────────────────────────────────
-echo ""
-echo "📦 Step 1: Installing frontend dependencies..."
+echo "📦 Installing frontend dependencies..."
 cd frontend
-npm install
-echo "✅ Frontend dependencies installed"
-
-# ─── Step 2: Build frontend ───────────────────────────────────────────────────
-echo ""
-echo "🔨 Step 2: Building frontend for production..."
 
 # Create frontend/.env if it doesn't exist
 if [ ! -f ".env" ]; then
@@ -27,20 +17,18 @@ if [ ! -f ".env" ]; then
   echo "✅ Created frontend/.env"
 fi
 
+npm install
+echo "✅ Frontend dependencies installed"
+
+# ─── Step 2: Build frontend ───────────────────────────────────────────────────
+echo "🔨 Building frontend for production..."
 npm run build
 echo "✅ Frontend built → frontend/dist/"
 
 # ─── Step 3: Install backend (root) dependencies ─────────────────────────────
-echo ""
-echo "📦 Step 3: Installing backend dependencies..."
+echo "📦 Installing backend dependencies..."
 cd ..
 npm install --omit=dev
 echo "✅ Backend dependencies installed"
 
-# ─── Done ─────────────────────────────────────────────────────────────────────
-echo ""
 echo "✅ Deployment complete!"
-echo "   → app.js is ready to serve"
-echo "   → frontend/dist/ is built and ready"
-echo "   → Plesk will restart the Node.js app automatically"
-echo ""
