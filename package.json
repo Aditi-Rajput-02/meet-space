@@ -5,7 +5,8 @@
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
-    "dev": "nodemon app.js"
+    "dev": "nodemon app.js",
+    "setup": "npm install && npm --prefix frontend install && npm --prefix frontend run build"
   },
   "dependencies": {
     "cors": "^2.8.5",
