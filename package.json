@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
-    "setup": "npm install"
+    "setup": "npm install --omit=dev"
   },
   "dependencies": {
     "cors": "^2.8.5",
