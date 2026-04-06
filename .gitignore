@@ -15,8 +15,9 @@ frontend/.env
 backend/.env
 
 # ─── Build Output ─────────────────────────────────────────────────────────────
-# frontend/dist is built by the deploy script on the server — don't commit it
-frontend/dist/
+# frontend/dist is pre-built locally and committed to git
+# (server cannot build due to Windows permission restrictions with esbuild)
+# frontend/dist/   <-- intentionally NOT ignored so dist is committed
 frontend/build/
 
 # ─── Logs ─────────────────────────────────────────────────────────────────────
