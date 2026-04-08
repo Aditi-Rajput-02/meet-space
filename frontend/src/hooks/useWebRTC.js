@@ -1,22 +1,12 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { getSocket, disconnectSocket } from '../services/socket.js'
 
-// ICE servers — STUN + multiple TURN providers for NAT traversal
+// ICE servers — STUN only as fallback; real TURN credentials come from server via room-joined
+// The server generates time-limited HMAC credentials for Metered.ca TURN
 const DEFAULT_ICE_SERVERS = [
-  // Google STUN
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  // Cloudflare STUN
   { urls: 'stun:stun.cloudflare.com:3478' },
-  // Metered.ca free TURN (reliable)
-  { urls: 'turn:a.relay.metered.ca:80', username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
-  { urls: 'turn:a.relay.metered.ca:80?transport=tcp', username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
-  { urls: 'turn:a.relay.metered.ca:443', username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
-  { urls: 'turns:a.relay.metered.ca:443', username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
-  // Numb TURN (backup)
-  { urls: 'turn:numb.viagenie.ca', username: 'webrtc@live.com', credential: 'muazkh' },
-  // Xirsys-style backup
-  { urls: 'turn:turn.anyfirewall.com:443?transport=tcp', username: 'webrtc', credential: 'webrtc' },
 ]
 
 const useWebRTC = (roomId, userName) => {
@@ -225,15 +215,14 @@ const useWebRTC = (roomId, userName) => {
         socket.on('room-joined', async ({ participants: existingParticipants, chatHistory, iceServers }) => {
           if (!mounted) return
 
-          // Merge server ICE config with our hardcoded TURN servers
-          // Never replace — always keep our TURN servers even if server only sends STUN
+          // Use server-provided ICE config (server generates HMAC TURN credentials)
           if (iceServers && iceServers.length > 0) {
-            const serverTurn = iceServers.filter(s => {
+            iceServersRef.current = iceServers
+            console.log('[ICE] Using server ICE config:', iceServersRef.current.length, 'servers')
+            iceServers.forEach(s => {
               const url = Array.isArray(s.urls) ? s.urls[0] : s.urls
-              return url && (url.startsWith('turn:') || url.startsWith('turns:'))
+              console.log('[ICE] Server:', url)
             })
-            iceServersRef.current = [...DEFAULT_ICE_SERVERS, ...serverTurn]
-            console.log('[ICE] Merged ICE config:', iceServersRef.current.length, 'servers')
           }
 
           setParticipants(existingParticipants)

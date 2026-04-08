@@ -79,39 +79,49 @@ function socketRateLimit(socketId) {
 const PORT = process.env.PORT || 5001;
 const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:3000';
 
-// TURN server credentials from .env (optional - falls back to STUN only)
+const crypto = require('crypto');
+
+// TURN server credentials from .env
 const TURN_URL      = process.env.TURN_URL      || null;
 const TURN_USERNAME = process.env.TURN_USERNAME  || null;
 const TURN_PASSWORD = process.env.TURN_PASSWORD  || null;
 
+// Metered.ca HMAC Secret Key for time-limited TURN credential generation
+// Set METERED_SECRET_KEY and METERED_APP_NAME in .env on the server
+const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY || 'QvG55WgkWiZHfy8fwHD_N3NBQRvaAmdHpscvgrFyW6zKYjXF';
+const METERED_APP_NAME   = process.env.METERED_APP_NAME   || 'meetconnect';
+
+// Generate time-limited TURN credentials using HMAC-SHA1 (RFC 8489 / Coturn style)
+// Metered.ca TURN servers validate these using the shared secret
+function generateMeteredTurnCredentials() {
+  const ttl = 24 * 3600; // 24 hours
+  const timestamp = Math.floor(Date.now() / 1000) + ttl;
+  const username = `${timestamp}:meetconnect`;
+  const credential = crypto.createHmac('sha1', METERED_SECRET_KEY).update(username).digest('base64');
+  return { username, credential };
+}
+
 // Build ICE server list to send to clients
-// Includes multiple TURN providers for reliable NAT traversal
 function buildIceServers() {
+  const { username, credential } = generateMeteredTurnCredentials();
   const iceServers = [
     // STUN servers
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
-    // Metered.ca free TURN — reliable, multiple ports/protocols
-    { urls: 'turn:a.relay.metered.ca:80',               username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
-    { urls: 'turn:a.relay.metered.ca:80?transport=tcp',  username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
-    { urls: 'turn:a.relay.metered.ca:443',               username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
-    { urls: 'turns:a.relay.metered.ca:443',              username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
+    // Metered.ca TURN servers with HMAC credentials
+    { urls: `turn:${METERED_APP_NAME}.metered.live:80`,                        username, credential },
+    { urls: `turn:${METERED_APP_NAME}.metered.live:80?transport=tcp`,          username, credential },
+    { urls: `turn:${METERED_APP_NAME}.metered.live:443`,                       username, credential },
+    { urls: `turns:${METERED_APP_NAME}.metered.live:443`,                      username, credential },
+    { urls: `turn:${METERED_APP_NAME}.metered.live:443?transport=tcp`,         username, credential },
   ];
 
-  // Also add TURN from .env if configured (takes priority as custom server)
+  // Also add TURN from .env if configured
   if (TURN_URL && TURN_USERNAME && TURN_PASSWORD) {
-    iceServers.push({
-      urls: TURN_URL,
-      username: TURN_USERNAME,
-      credential: TURN_PASSWORD,
-    });
+    iceServers.push({ urls: TURN_URL, username: TURN_USERNAME, credential: TURN_PASSWORD });
     if (TURN_URL.startsWith('turn:')) {
-      iceServers.push({
-        urls: TURN_URL.replace('turn:', 'turns:'),
-        username: TURN_USERNAME,
-        credential: TURN_PASSWORD,
-      });
+      iceServers.push({ urls: TURN_URL.replace('turn:', 'turns:'), username: TURN_USERNAME, credential: TURN_PASSWORD });
     }
   }
 
