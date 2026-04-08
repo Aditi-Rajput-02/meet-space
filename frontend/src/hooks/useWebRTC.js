@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { getSocket, disconnectSocket } from '../services/socket.js'
 
-// Default ICE servers (STUN only) used until server sends its config
+// ICE servers — STUN + free TURN for NAT traversal in production
 const DEFAULT_ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' },
+  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turns:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
 ]
 
 const useWebRTC = (roomId, userName) => {
@@ -28,6 +29,7 @@ const useWebRTC = (roomId, userName) => {
   const [handRaised, setHandRaised] = useState(false)
   const [notifications, setNotifications] = useState([])
   const [connectionStatus, setConnectionStatus] = useState('connecting')
+  const [iceDebug, setIceDebug] = useState({}) // peerId -> { iceState, connState, candidates }
 
   const localStreamRef = useRef(null)
   const screenStreamRef = useRef(null)
@@ -61,23 +63,22 @@ const useWebRTC = (roomId, userName) => {
           })
         }
 
-    // Handle remote stream - fires for new tracks AND replaced tracks (screen share)
+    // Handle remote stream - fires for each incoming track
     pc.ontrack = (event) => {
+      const incomingTrack = event.track
+      const incomingStream = event.streams[0]
+      console.log(`[WebRTC] ontrack from ${peerId}: kind=${incomingTrack.kind}`)
       setRemoteStreams(prev => {
+        let newStream
         if (prev[peerId]) {
-          const existingStream = prev[peerId]
-          event.streams[0].getTracks().forEach(track => {
-            const oldTrack = existingStream.getTracks().find(t => t.kind === track.kind)
-            if (oldTrack && oldTrack.id !== track.id) {
-              existingStream.removeTrack(oldTrack)
-              existingStream.addTrack(track)
-            } else if (!oldTrack) {
-              existingStream.addTrack(track)
-            }
-          })
-          return { ...prev, [peerId]: new MediaStream(existingStream.getTracks()) }
+          const existingTracks = prev[peerId].getTracks().filter(t => t.kind !== incomingTrack.kind)
+          newStream = new MediaStream([...existingTracks, incomingTrack])
+        } else if (incomingStream) {
+          newStream = new MediaStream(incomingStream.getTracks())
+        } else {
+          newStream = new MediaStream([incomingTrack])
         }
-        return { ...prev, [peerId]: event.streams[0] }
+        return { ...prev, [peerId]: newStream }
       })
     }
 
@@ -93,12 +94,23 @@ const useWebRTC = (roomId, userName) => {
 
     pc.onicegatheringstatechange = () => {
       console.log(`[ICE] Gathering state for ${peerId}: ${pc.iceGatheringState}`)
+      setIceDebug(prev => ({ ...prev, [peerId]: { ...prev[peerId], gatherState: pc.iceGatheringState } }))
+    }
+
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[ICE] Connection state for ${peerId}: ${pc.iceConnectionState}`)
+      setIceDebug(prev => ({ ...prev, [peerId]: { ...prev[peerId], iceState: pc.iceConnectionState } }))
+    }
+
+    pc.onicecandidateerror = (e) => {
+      console.warn(`[ICE] Candidate error for ${peerId}: ${e.errorCode} ${e.errorText} url=${e.url}`)
     }
 
     pc.onconnectionstatechange = () => {
       console.log(`[WebRTC] Connection state for ${peerId}: ${pc.connectionState}`)
+      setIceDebug(prev => ({ ...prev, [peerId]: { ...prev[peerId], connState: pc.connectionState } }))
       if (pc.connectionState === 'failed') {
-        // Try ICE restart on failure
+        console.warn(`[WebRTC] Connection failed for ${peerId}, attempting ICE restart`)
         pc.restartIce()
       }
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
@@ -203,10 +215,15 @@ const useWebRTC = (roomId, userName) => {
         socket.on('room-joined', async ({ participants: existingParticipants, chatHistory, iceServers }) => {
           if (!mounted) return
 
-          // Update ICE servers with backend config (includes TURN if configured)
+          // Merge server ICE config with our hardcoded TURN servers
+          // Never replace — always keep our TURN servers even if server only sends STUN
           if (iceServers && iceServers.length > 0) {
-            iceServersRef.current = iceServers
-            console.log('[ICE] Using server-provided ICE config:', iceServers.length, 'servers')
+            const serverTurn = iceServers.filter(s => {
+              const url = Array.isArray(s.urls) ? s.urls[0] : s.urls
+              return url && (url.startsWith('turn:') || url.startsWith('turns:'))
+            })
+            iceServersRef.current = [...DEFAULT_ICE_SERVERS, ...serverTurn]
+            console.log('[ICE] Merged ICE config:', iceServersRef.current.length, 'servers')
           }
 
           setParticipants(existingParticipants)
@@ -614,6 +631,8 @@ const useWebRTC = (roomId, userName) => {
     handRaised,
     notifications,
     connectionStatus,
+    iceDebug,
+    peerConnectionsRef,
     toggleAudio,
     toggleVideo,
     toggleScreenShare,

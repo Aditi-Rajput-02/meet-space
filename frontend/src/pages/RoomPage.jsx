@@ -42,6 +42,7 @@ const RoomPage = () => {
     handRaised,
     notifications,
     connectionStatus,
+    iceDebug,
     toggleAudio,
     toggleVideo,
     toggleScreenShare,
@@ -49,6 +50,8 @@ const RoomPage = () => {
     sendMessage,
     leaveRoom,
   } = useWebRTC(nameConfirmed ? roomId : null, userName)
+
+  const [showDebug, setShowDebug] = useState(false)
 
   // Track unread messages
   useEffect(() => {
@@ -196,6 +199,31 @@ const RoomPage = () => {
 
       {/* Notifications */}
       <Notifications notifications={notifications} />
+
+      {/* ICE Debug Panel */}
+      <div style={{ position: 'fixed', bottom: 80, right: 10, zIndex: 9999 }}>
+        <button
+          onClick={() => setShowDebug(p => !p)}
+          style={{ background: '#333', color: '#fff', border: 'none', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontSize: 12 }}
+        >
+          🔧 Debug
+        </button>
+        {showDebug && (
+          <div style={{ background: 'rgba(0,0,0,0.85)', color: '#0f0', fontFamily: 'monospace', fontSize: 11, padding: 10, borderRadius: 8, marginTop: 4, maxWidth: 320, maxHeight: 300, overflowY: 'auto' }}>
+            <div style={{ color: '#ff0', marginBottom: 4 }}>ICE Debug Info</div>
+            {Object.keys(iceDebug).length === 0 && <div>No peers yet</div>}
+            {Object.entries(iceDebug).map(([peerId, info]) => (
+              <div key={peerId} style={{ marginBottom: 8, borderBottom: '1px solid #333', paddingBottom: 4 }}>
+                <div style={{ color: '#aaf' }}>Peer: {peerId.substring(0, 8)}...</div>
+                <div>ICE: <span style={{ color: info.iceState === 'connected' ? '#0f0' : info.iceState === 'failed' ? '#f00' : '#ff0' }}>{info.iceState || 'pending'}</span></div>
+                <div>Conn: <span style={{ color: info.connState === 'connected' ? '#0f0' : info.connState === 'failed' ? '#f00' : '#ff0' }}>{info.connState || 'pending'}</span></div>
+                <div>Gather: {info.gatherState || 'pending'}</div>
+              </div>
+            ))}
+            <div style={{ color: '#aaa', marginTop: 4 }}>Open browser console for full logs</div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
