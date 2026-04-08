@@ -85,23 +85,27 @@ const TURN_USERNAME = process.env.TURN_USERNAME  || null;
 const TURN_PASSWORD = process.env.TURN_PASSWORD  || null;
 
 // Build ICE server list to send to clients
+// Includes multiple TURN providers for reliable NAT traversal
 function buildIceServers() {
   const iceServers = [
+    // STUN servers
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    // Metered.ca free TURN — reliable, multiple ports/protocols
+    { urls: 'turn:a.relay.metered.ca:80',               username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
+    { urls: 'turn:a.relay.metered.ca:80?transport=tcp',  username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
+    { urls: 'turn:a.relay.metered.ca:443',               username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
+    { urls: 'turns:a.relay.metered.ca:443',              username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
   ];
 
-  // Add TURN server if configured
+  // Also add TURN from .env if configured (takes priority as custom server)
   if (TURN_URL && TURN_USERNAME && TURN_PASSWORD) {
     iceServers.push({
       urls: TURN_URL,
       username: TURN_USERNAME,
       credential: TURN_PASSWORD,
     });
-    // Also add TURNS (TURN over TLS) if the URL supports it
     if (TURN_URL.startsWith('turn:')) {
       iceServers.push({
         urls: TURN_URL.replace('turn:', 'turns:'),

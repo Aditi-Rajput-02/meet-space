@@ -1,14 +1,22 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { getSocket, disconnectSocket } from '../services/socket.js'
 
-// ICE servers — STUN + free TURN for NAT traversal in production
+// ICE servers — STUN + multiple TURN providers for NAT traversal
 const DEFAULT_ICE_SERVERS = [
+  // Google STUN
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turns:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+  // Cloudflare STUN
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  // Metered.ca free TURN (reliable)
+  { urls: 'turn:a.relay.metered.ca:80', username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
+  { urls: 'turn:a.relay.metered.ca:80?transport=tcp', username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
+  { urls: 'turn:a.relay.metered.ca:443', username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
+  { urls: 'turns:a.relay.metered.ca:443', username: 'e8dd65f0519bf623c0c0b6e4', credential: 'uMQSABgMhcHKMp2/' },
+  // Numb TURN (backup)
+  { urls: 'turn:numb.viagenie.ca', username: 'webrtc@live.com', credential: 'muazkh' },
+  // Xirsys-style backup
+  { urls: 'turn:turn.anyfirewall.com:443?transport=tcp', username: 'webrtc', credential: 'webrtc' },
 ]
 
 const useWebRTC = (roomId, userName) => {
@@ -112,8 +120,10 @@ const useWebRTC = (roomId, userName) => {
       if (pc.connectionState === 'failed') {
         console.warn(`[WebRTC] Connection failed for ${peerId}, attempting ICE restart`)
         pc.restartIce()
+        // Don't delete stream on failure — ICE restart may recover it
       }
-      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      if (pc.connectionState === 'closed') {
+        // Only remove stream when connection is fully closed (not just failed)
         setRemoteStreams(prev => {
           const updated = { ...prev }
           delete updated[peerId]
