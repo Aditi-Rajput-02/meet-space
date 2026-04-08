@@ -104,7 +104,7 @@ const HomePage = () => {
               </p>
               {error && <div className="form-error">{error}</div>}
               <button type="submit" className="btn-primary">
-                <span>🚀</span> Start Meeting
+                 Start Meeting
               </button>
             </form>
           )}
