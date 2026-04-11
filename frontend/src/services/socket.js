@@ -1,19 +1,28 @@
 import { io } from 'socket.io-client'
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000'
+// In production, the frontend is served by the same Node.js server,
+// so we connect to the same origin (empty string = current host).
+// In development, we connect to localhost:5001.
+// VITE_SOCKET_URL can override both (set in frontend/.env).
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL ||
+  (import.meta.env.DEV ? 'http://localhost:5001' : '')
 
 let socket = null
 
 export const getSocket = () => {
   if (!socket) {
     socket = io(SOCKET_URL, {
-      transports: ['websocket', 'polling'],
+      transports: ['polling', 'websocket'], // Start with polling (more reliable), upgrade to WS
       reconnection: true,
       reconnectionAttempts: 10,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
       timeout: 20000,
       autoConnect: true,
+    })
+
+    socket.on('connect', () => {
+      console.log('[Socket] Connected:', socket.id, '| transport:', socket.io.engine.transport.name)
     })
 
     socket.on('connect_error', (err) => {

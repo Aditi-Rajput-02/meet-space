@@ -57,7 +57,9 @@ setInterval(() => {
 // ─── SOCKET RATE LIMITER ─────────────────────────────────────────────────────
 const socketRateLimitMap = new Map();
 const SOCKET_RATE_LIMIT_WINDOW_MS = 10 * 1000; // 10 seconds
-const SOCKET_RATE_LIMIT_MAX = 30; // max 30 socket events per 10 seconds
+// With 10 users: join triggers ~9 offers + 9 answers + ~50 ICE candidates per peer = ~70 events.
+// Raised from 30 → 120 to handle multi-peer signaling bursts without silently dropping events.
+const SOCKET_RATE_LIMIT_MAX = 120; // max 120 socket events per 10 seconds
 
 function socketRateLimit(socketId) {
   const now = Date.now();
@@ -79,58 +81,87 @@ function socketRateLimit(socketId) {
 const PORT = process.env.PORT || 5001;
 const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:3000';
 
-const crypto = require('crypto');
+// Allow production domain + all localhost variants for local development
+const ALLOWED_ORIGINS = [
+  CLIENT_URL,
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://localhost:4173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
+];
 
-// TURN server credentials from .env
-const TURN_URL      = process.env.TURN_URL      || null;
-const TURN_USERNAME = process.env.TURN_USERNAME  || null;
-const TURN_PASSWORD = process.env.TURN_PASSWORD  || null;
-
-// Metered.ca HMAC Secret Key for time-limited TURN credential generation
-// Set METERED_SECRET_KEY and METERED_APP_NAME in .env on the server
-const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY || 'QvG55WgkWiZHfy8fwHD_N3NBQRvaAmdHpscvgrFyW6zKYjXF';
-const METERED_APP_NAME   = process.env.METERED_APP_NAME   || 'meetconnect';
-
-// Generate time-limited TURN credentials using HMAC-SHA1 (RFC 8489 / Coturn style)
-// Metered.ca TURN servers validate these using the shared secret
-function generateMeteredTurnCredentials() {
-  const ttl = 24 * 3600; // 24 hours
-  const timestamp = Math.floor(Date.now() / 1000) + ttl;
-  const username = `${timestamp}:meetconnect`;
-  const credential = crypto.createHmac('sha1', METERED_SECRET_KEY).update(username).digest('base64');
-  return { username, credential };
+function isOriginAllowed(origin) {
+  if (!origin) return true; // allow server-to-server / curl / same-origin
+  return ALLOWED_ORIGINS.includes(origin);
 }
 
-// Build ICE server list to send to clients
-function buildIceServers() {
-  const { username, credential } = generateMeteredTurnCredentials();
-  const iceServers = [
-    // STUN servers
+// Metered.ca API key for fetching TURN credentials
+const METERED_API_KEY = process.env.METERED_API_KEY || '771067a8b5f5d3459e1022433626722ca050';
+const METERED_API_URL = `https://meetconnect.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`;
+
+// Cache for TURN credentials fetched from Metered.ca API
+let cachedIceServers = null;
+let iceServersCacheExpiry = 0;
+
+// Fetch TURN credentials from Metered.ca REST API (cached for 12 hours)
+async function fetchMeteredIceServers() {
+  if (cachedIceServers && Date.now() < iceServersCacheExpiry) {
+    return cachedIceServers;
+  }
+  try {
+    const https = require('https');
+    const data = await new Promise((resolve, reject) => {
+      https.get(METERED_API_URL, (res) => {
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => {
+          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+        });
+      }).on('error', reject);
+    });
+    if (Array.isArray(data) && data.length > 0) {
+      // Prepend Google STUN servers for reliability
+      cachedIceServers = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        ...data,
+      ];
+      iceServersCacheExpiry = Date.now() + 12 * 60 * 60 * 1000; // 12 hours
+      console.log(`[TURN] Fetched ${data.length} ICE servers from Metered.ca`);
+      return cachedIceServers;
+    }
+  } catch (err) {
+    console.warn('[TURN] Failed to fetch Metered.ca ICE servers:', err.message);
+  }
+  // Fallback: STUN only
+  return [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
-    // Metered.ca TURN servers with HMAC credentials
-    { urls: `turn:${METERED_APP_NAME}.metered.live:80`,                        username, credential },
-    { urls: `turn:${METERED_APP_NAME}.metered.live:80?transport=tcp`,          username, credential },
-    { urls: `turn:${METERED_APP_NAME}.metered.live:443`,                       username, credential },
-    { urls: `turns:${METERED_APP_NAME}.metered.live:443`,                      username, credential },
-    { urls: `turn:${METERED_APP_NAME}.metered.live:443?transport=tcp`,         username, credential },
   ];
-
-  // Also add TURN from .env if configured
-  if (TURN_URL && TURN_USERNAME && TURN_PASSWORD) {
-    iceServers.push({ urls: TURN_URL, username: TURN_USERNAME, credential: TURN_PASSWORD });
-    if (TURN_URL.startsWith('turn:')) {
-      iceServers.push({ urls: TURN_URL.replace('turn:', 'turns:'), username: TURN_USERNAME, credential: TURN_PASSWORD });
-    }
-  }
-
-  return iceServers;
 }
 
-// Configure CORS
+// Synchronous fallback using last cached value (for startup log)
+function buildIceServers() {
+  return cachedIceServers || [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+  ];
+}
+
+// Pre-fetch ICE servers at startup
+fetchMeteredIceServers().then(servers => {
+  console.log(`[TURN] ICE servers ready: ${servers.length} total`);
+}).catch(() => {});
+
+// Configure CORS — allow production domain + localhost for development
 app.use(cors({
-  origin: CLIENT_URL,
+  origin: (origin, callback) => {
+    if (isOriginAllowed(origin)) return callback(null, true);
+    callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
   methods: ['GET', 'POST'],
   credentials: true
 }));
@@ -141,7 +172,10 @@ app.use(rateLimit);
 // Socket.io setup
 const io = new Server(server, {
   cors: {
-    origin: CLIENT_URL,
+    origin: (origin, callback) => {
+      if (isOriginAllowed(origin)) return callback(null, true);
+      callback(new Error(`CORS: origin ${origin} not allowed`));
+    },
     methods: ['GET', 'POST'],
     credentials: true
   },
@@ -157,6 +191,10 @@ const io = new Server(server, {
 // }
 const rooms = new Map();
 
+// Maximum participants per room — beyond this, new joins are rejected.
+// 10 peers = 45 peer connections total (n*(n-1)/2), which is manageable.
+const MAX_PARTICIPANTS_PER_ROOM = 10;
+
 function getOrCreateRoom(roomId) {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, {
@@ -167,6 +205,16 @@ function getOrCreateRoom(roomId) {
     });
   }
   return rooms.get(roomId);
+}
+
+// Validate that an SDP object has the required fields
+function isValidSdp(sdp) {
+  return sdp && typeof sdp.type === 'string' && typeof sdp.sdp === 'string' && sdp.sdp.length > 0;
+}
+
+// Validate ICE candidate object
+function isValidCandidate(candidate) {
+  return candidate && (typeof candidate.candidate === 'string' || candidate.candidate === '');
 }
 
 // ─── REST API ────────────────────────────────────────────────────────────────
@@ -236,7 +284,7 @@ io.on('connection', (socket) => {
   });
 
   // ── JOIN ROOM ──────────────────────────────────────────────────────────────
-  socket.on('join-room', ({ roomId, userName }) => {
+  socket.on('join-room', async ({ roomId, userName, audioEnabled: initAudio, videoEnabled: initVideo }) => {
     if (!roomId || !userName) return;
     // Sanitize inputs
     const safeRoomId = String(roomId).trim().substring(0, 50).replace(/[^a-zA-Z0-9_-]/g, '');
@@ -247,13 +295,28 @@ io.on('connection', (socket) => {
 
     const room = getOrCreateRoom(roomId);
 
+    // If this socket is already in the room (reconnect scenario), remove the old entry first
+    // so the participant list stays clean and the new socket ID is used.
+    if (room.participants.has(socket.id)) {
+      room.participants.delete(socket.id);
+      console.log(`[Room] Re-join detected for ${socket.id} in room ${roomId} — refreshing entry`);
+    }
+
+    // Enforce room size limit to keep peer connections manageable
+    if (room.participants.size >= MAX_PARTICIPANTS_PER_ROOM) {
+      socket.emit('room-full', { roomId, max: MAX_PARTICIPANTS_PER_ROOM });
+      console.warn(`[Room] Room ${roomId} is full (${room.participants.size}/${MAX_PARTICIPANTS_PER_ROOM}), rejecting ${socket.id}`);
+      return;
+    }
+
     const participant = {
       id: socket.id,
       name: userName.trim() || `User-${socket.id.substring(0, 4)}`,
       joinedAt: new Date().toISOString(),
-      // State sync fields
-      audioEnabled: true,
-      videoEnabled: true,
+      // Accept actual initial media state from client so the participant list
+      // shown to late joiners reflects the real camera/mic state at join time.
+      audioEnabled: initAudio !== false, // default true unless explicitly false
+      videoEnabled: initVideo !== false, // default true unless explicitly false
       isScreenSharing: false,
       handRaised: false,
     };
@@ -277,11 +340,14 @@ io.on('connection', (socket) => {
         handRaised: p.handRaised,
       }));
 
+    // Fetch fresh TURN credentials from Metered.ca (cached after first call)
+    const iceServers = await fetchMeteredIceServers();
+
     socket.emit('room-joined', {
       roomId,
       participants: existingParticipants,
       chatHistory: room.messages.slice(-50),
-      iceServers: buildIceServers(),   // ← send ICE config on join
+      iceServers,   // ← send real TURN credentials on join
     });
 
     // Notify everyone else that a new user joined (with their initial state)
@@ -297,9 +363,10 @@ io.on('connection', (socket) => {
 
   // ── WEBRTC SIGNALING ───────────────────────────────────────────────────────
 
-  // Offer: caller → callee
+  // Offer: caller → callee (validate SDP before relaying)
   socket.on('offer', ({ targetId, offer }) => {
-    if (!targetId || !offer) return;
+    if (!targetId || !isValidSdp(offer)) return;
+    if (offer.type !== 'offer') return; // must be an offer SDP
     console.log(`[WebRTC] Offer: ${socket.id} → ${targetId}`);
     io.to(targetId).emit('offer', {
       fromId: socket.id,
@@ -308,9 +375,10 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Answer: callee → caller
+  // Answer: callee → caller (validate SDP before relaying)
   socket.on('answer', ({ targetId, answer }) => {
-    if (!targetId || !answer) return;
+    if (!targetId || !isValidSdp(answer)) return;
+    if (answer.type !== 'answer') return; // must be an answer SDP
     console.log(`[WebRTC] Answer: ${socket.id} → ${targetId}`);
     io.to(targetId).emit('answer', {
       fromId: socket.id,
@@ -318,9 +386,9 @@ io.on('connection', (socket) => {
     });
   });
 
-  // ICE Candidate: trickle ICE relay
+  // ICE Candidate: trickle ICE relay (validate candidate before relaying)
   socket.on('ice-candidate', ({ targetId, candidate }) => {
-    if (!targetId || !candidate) return;
+    if (!targetId || !isValidCandidate(candidate)) return;
     io.to(targetId).emit('ice-candidate', {
       fromId: socket.id,
       candidate,
@@ -493,14 +561,8 @@ server.on('error', (err) => {
 });
 
 server.listen(PORT, () => {
-  const iceList = buildIceServers();
   console.log(`\n🚀 WebRTC Signaling Server running on port ${PORT}`);
   console.log(`📡 Accepting connections from: ${CLIENT_URL}`);
   console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-  console.log(`🧊 ICE servers configured: ${iceList.length} (STUN: ${iceList.filter(s => s.urls?.toString().startsWith('stun')).length}, TURN: ${iceList.filter(s => s.urls?.toString().startsWith('turn') || s.urls?.toString().startsWith('turns')).length})`);
-  if (!TURN_URL) {
-    console.log(`⚠️  No TURN server configured. Add TURN_URL, TURN_USERNAME, TURN_PASSWORD to .env for NAT traversal fallback.\n`);
-  } else {
-    console.log(`✅ TURN server: ${TURN_URL}\n`);
-  }
+  console.log(`🧊 TURN credentials: fetched from Metered.ca API (meetconnect.metered.live)\n`);
 });

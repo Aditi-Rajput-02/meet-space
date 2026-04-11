@@ -48,11 +48,32 @@ const useWebRTC = (roomId, userName) => {
   }, [])
 
   const createPeerConnection = useCallback((peerId) => {
+    // Close and clean up any existing PC for this peer before creating a new one
+    // (prevents leaking RTCPeerConnection objects on reconnect/renegotiation)
+    if (peerConnectionsRef.current[peerId]) {
+      peerConnectionsRef.current[peerId].ontrack = null
+      peerConnectionsRef.current[peerId].onicecandidate = null
+      peerConnectionsRef.current[peerId].onnegotiationneeded = null
+      peerConnectionsRef.current[peerId].onconnectionstatechange = null
+      peerConnectionsRef.current[peerId].oniceconnectionstatechange = null
+      peerConnectionsRef.current[peerId].onsignalingstatechange = null
+      peerConnectionsRef.current[peerId].close()
+      delete peerConnectionsRef.current[peerId]
+    }
+
     // Use dynamic ICE servers from backend (includes TURN if configured)
     const pc = new RTCPeerConnection({ iceServers: iceServersRef.current })
 
     // Initialize ICE candidate queue for this peer
     iceCandidateQueues.current[peerId] = []
+
+    // Flag to suppress onnegotiationneeded during initial track setup.
+    // The initial offer is sent manually after createPeerConnection returns,
+    // so we don't want onnegotiationneeded to fire a duplicate offer.
+    // We clear the flag after a macrotask delay because onnegotiationneeded
+    // is fired asynchronously (queued task), so a synchronous flag reset
+    // would clear too early and fail to suppress the initial event.
+    let isSettingUp = true
 
         // Add local tracks (always use localStreamRef which has the real camera stream)
         if (localStreamRef.current) {
@@ -60,6 +81,10 @@ const useWebRTC = (roomId, userName) => {
             pc.addTrack(track, localStreamRef.current)
           })
         }
+
+    // Defer clearing the flag so the initial onnegotiationneeded (fired async) is suppressed,
+    // but subsequent ones (from mid-call addTrack) are allowed through.
+    setTimeout(() => { isSettingUp = false }, 0)
 
     // Handle remote stream - fires for each incoming track
     pc.ontrack = (event) => {
@@ -138,15 +163,53 @@ const useWebRTC = (roomId, userName) => {
       }
     }
 
+    // onnegotiationneeded: fired automatically when tracks are added/removed mid-call.
+    // This is the standard WebRTC renegotiation trigger — handles both:
+    //   • A late joiner turning their own camera ON (their side fires this)
+    //   • An existing user turning camera ON after a late joiner connected (their side fires this)
+    pc.onnegotiationneeded = async () => {
+      // Skip during initial setup — the caller sends the first offer manually
+      if (isSettingUp) {
+        console.log(`[WebRTC] onnegotiationneeded suppressed during setup for ${peerId}`)
+        return
+      }
+      // Only the offerer side should initiate — skip if we're currently answering
+      if (pc.signalingState !== 'stable') {
+        console.log(`[WebRTC] onnegotiationneeded skipped for ${peerId} (state=${pc.signalingState})`)
+        return
+      }
+      console.log(`[WebRTC] onnegotiationneeded for ${peerId} — sending renegotiation offer`)
+      try {
+        const offer = await pc.createOffer()
+        // Guard: state may have changed while awaiting
+        if (pc.signalingState !== 'stable') return
+        await pc.setLocalDescription(offer)
+        socketRef.current?.emit('offer', { targetId: peerId, offer })
+      } catch (err) {
+        console.error(`[WebRTC] onnegotiationneeded offer failed for ${peerId}:`, err)
+      }
+    }
+
     peerConnectionsRef.current[peerId] = pc
     return pc
   }, [])
 
   const closePeerConnection = useCallback((peerId) => {
     if (peerConnectionsRef.current[peerId]) {
-      peerConnectionsRef.current[peerId].close()
+      const pc = peerConnectionsRef.current[peerId]
+      // Null all handlers before closing to prevent stale callbacks firing
+      pc.ontrack = null
+      pc.onicecandidate = null
+      pc.onnegotiationneeded = null
+      pc.onconnectionstatechange = null
+      pc.oniceconnectionstatechange = null
+      pc.onicegatheringstatechange = null
+      pc.onsignalingstatechange = null
+      pc.close()
       delete peerConnectionsRef.current[peerId]
     }
+    // Clear any queued ICE candidates for this peer
+    delete iceCandidateQueues.current[peerId]
     setRemoteStreams(prev => {
       const updated = { ...prev }
       delete updated[peerId]
@@ -203,13 +266,60 @@ const useWebRTC = (roomId, userName) => {
         const socket = getSocket()
         socketRef.current = socket
 
-        socket.on('connect', () => {
-          socket.emit('join-room', { roomId, userName })
-        })
+        // Emit join-room exactly once:
+        // - If already connected, emit immediately
+        // - Otherwise wait for the 'connect' event
+        // Using a flag prevents double-emit if socket connects synchronously
+        let joinedRoom = false
+        const doJoinRoom = () => {
+          if (joinedRoom) return
+          joinedRoom = true
+          // Send actual initial media state so the server stores the correct values.
+          // Late joiners will see the correct camera/mic state in the participant list.
+          const initAudio = sessionStorage.getItem('audioEnabled') !== 'false'
+          const initVideo = sessionStorage.getItem('videoEnabled') !== 'false'
+          socket.emit('join-room', { roomId, userName, audioEnabled: initAudio, videoEnabled: initVideo })
+        }
+
+        socket.on('connect', doJoinRoom)
 
         if (socket.connected) {
-          socket.emit('join-room', { roomId, userName })
+          doJoinRoom()
         }
+
+        // Handle socket reconnect: close all stale peer connections and re-join the room.
+        // The server will send a fresh room-joined with the current participant list,
+        // and we'll create new peer connections for everyone.
+        socket.on('reconnect', () => {
+          if (!mounted) return
+          console.log('[Socket] Reconnected — closing stale peer connections and re-joining room')
+          // Close all existing peer connections (they're dead after a reconnect)
+          Object.keys(peerConnectionsRef.current).forEach(peerId => {
+            const pc = peerConnectionsRef.current[peerId]
+            pc.ontrack = null
+            pc.onicecandidate = null
+            pc.onnegotiationneeded = null
+            pc.onconnectionstatechange = null
+            pc.oniceconnectionstatechange = null
+            pc.onicegatheringstatechange = null
+            pc.onsignalingstatechange = null
+            pc.close()
+          })
+          peerConnectionsRef.current = {}
+          iceCandidateQueues.current = {}
+          setRemoteStreams({})
+          setParticipants([])
+          // Re-join: reset the flag so doJoinRoom can fire again
+          joinedRoom = false
+          doJoinRoom()
+        })
+
+        // Room full — notify user and redirect them out
+        socket.on('room-full', ({ max }) => {
+          if (!mounted) return
+          addNotification(`Room is full (max ${max} participants)`, 'error')
+          setConnectionStatus('error')
+        })
 
         // Room joined - existing participants + ICE server config from backend
         socket.on('room-joined', async ({ participants: existingParticipants, chatHistory, iceServers }) => {
@@ -228,17 +338,18 @@ const useWebRTC = (roomId, userName) => {
           setParticipants(existingParticipants)
           setMessages(chatHistory || [])
 
-          // Create offers for all existing participants
-          for (const participant of existingParticipants) {
+          // Create offers for all existing participants IN PARALLEL for faster connection
+          // Each offer is independently error-handled so one failure doesn't block others
+          await Promise.all(existingParticipants.map(async (participant) => {
             const pc = createPeerConnection(participant.id)
             try {
               const offer = await pc.createOffer()
               await pc.setLocalDescription(offer)
               socket.emit('offer', { targetId: participant.id, offer })
             } catch (err) {
-              console.error('Error creating offer:', err)
+              console.error(`[WebRTC] Error creating offer for ${participant.id}:`, err)
             }
-          }
+          }))
         })
 
         // New user joined - include their initial state
@@ -279,18 +390,39 @@ const useWebRTC = (roomId, userName) => {
           }
         }
 
-        // Receive offer → set remote desc, create answer, flush ICE queue
+        // Receive offer → perfect negotiation pattern
+        // Reuse existing PC for renegotiation; handle glare (simultaneous offers) with rollback.
+        // "Polite" peer = the one who joined later (higher socket ID lexicographically).
+        // Polite peer rolls back its own offer when it receives a remote offer during glare.
         socket.on('offer', async ({ fromId, offer }) => {
           if (!mounted) return
-          const pc = createPeerConnection(fromId)
+          const existingPc = peerConnectionsRef.current[fromId]
+          const pc = existingPc || createPeerConnection(fromId)
+
+          // Detect glare: we already sent an offer and remote also sent one
+          const offerCollision = pc.signalingState !== 'stable'
+          // Polite peer: determined by socket ID comparison (consistent across both sides)
+          const isPolite = socket.id > fromId
+
+          if (offerCollision && !isPolite) {
+            // Impolite peer ignores the incoming offer — our offer takes precedence
+            console.log(`[WebRTC] Glare: impolite peer ignoring offer from ${fromId}`)
+            return
+          }
+
           try {
+            if (offerCollision && isPolite) {
+              // Polite peer rolls back its own offer to accept the remote one
+              console.log(`[WebRTC] Glare: polite peer rolling back for ${fromId}`)
+              await pc.setLocalDescription({ type: 'rollback' })
+            }
             await pc.setRemoteDescription(new RTCSessionDescription(offer))
             await flushIceCandidates(fromId, pc)
             const answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
             socket.emit('answer', { targetId: fromId, answer })
           } catch (err) {
-            console.error('Error handling offer:', err)
+            console.error(`[WebRTC] Error handling offer from ${fromId}:`, err)
           }
         })
 
@@ -298,13 +430,17 @@ const useWebRTC = (roomId, userName) => {
         socket.on('answer', async ({ fromId, answer }) => {
           if (!mounted) return
           const pc = peerConnectionsRef.current[fromId]
-          if (pc) {
-            try {
-              await pc.setRemoteDescription(new RTCSessionDescription(answer))
-              await flushIceCandidates(fromId, pc)
-            } catch (err) {
-              console.error('Error handling answer:', err)
-            }
+          if (!pc) return
+          // Guard: only accept answer when we're in have-local-offer state
+          if (pc.signalingState !== 'have-local-offer') {
+            console.warn(`[WebRTC] Ignoring answer from ${fromId} in state ${pc.signalingState}`)
+            return
+          }
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(answer))
+            await flushIceCandidates(fromId, pc)
+          } catch (err) {
+            console.error(`[WebRTC] Error handling answer from ${fromId}:`, err)
           }
         })
 
@@ -445,13 +581,18 @@ const useWebRTC = (roomId, userName) => {
         cameraTrackRef.current = newVideoTrack
 
         // Replace null/old sender with new track in all peer connections
-        const replacePromises = Object.values(peerConnectionsRef.current).map(pc => {
+        const replacePromises = Object.entries(peerConnectionsRef.current).map(async ([peerId, pc]) => {
           const sender = pc.getSenders().find(s => s.track?.kind === 'video' || s.track === null)
           if (sender) {
+            // Existing video sender (possibly null) — replaceTrack does NOT trigger onnegotiationneeded,
+            // so the remote side sees the new track without a full renegotiation round-trip.
             return sender.replaceTrack(newVideoTrack)
           } else {
+            // No video sender exists (peer joined while camera was off).
+            // addTrack will automatically fire onnegotiationneeded on this PC,
+            // which sends a renegotiation offer to the remote peer.
             pc.addTrack(newVideoTrack, localStreamRef.current)
-            return Promise.resolve()
+            // Do NOT manually createOffer here — onnegotiationneeded handles it.
           }
         })
         await Promise.all(replacePromises)
@@ -511,9 +652,12 @@ const useWebRTC = (roomId, userName) => {
           localStreamRef.current.addTrack(cameraTrack)
         }
         // Restore camera track in all peer connections
+        // Peers with no video sender (joined while camera was off) get addTrack,
+        // which fires onnegotiationneeded for automatic renegotiation.
         const restorePromises = Object.values(peerConnectionsRef.current).map(pc => {
           const sender = pc.getSenders().find(s => s.track?.kind === 'video' || s.track === null)
           if (sender) return sender.replaceTrack(cameraTrack)
+          pc.addTrack(cameraTrack, localStreamRef.current) // triggers onnegotiationneeded
           return Promise.resolve()
         })
         await Promise.all(restorePromises)
@@ -555,9 +699,11 @@ const useWebRTC = (roomId, userName) => {
         const replacePromises = Object.values(peerConnectionsRef.current).map(pc => {
           const sender = pc.getSenders().find(s => s.track?.kind === 'video' || s.track === null)
           if (sender) {
+            // Existing video sender — replaceTrack swaps the track without renegotiation
             return sender.replaceTrack(screenTrack)
           } else {
-            // No video sender yet - add the track
+            // No video sender (peer joined while camera was off).
+            // addTrack fires onnegotiationneeded automatically — no manual offer needed.
             pc.addTrack(screenTrack, localStreamRef.current)
             return Promise.resolve()
           }
