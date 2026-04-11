@@ -19,6 +19,8 @@ const useWebRTC = (roomId, userName) => {
     const saved = sessionStorage.getItem('audioEnabled')
     return saved === null ? true : saved === 'true'
   })
+  // Camera is ON by default on first join.
+  // sessionStorage persists the choice across refreshes within the same session.
   const [videoEnabled, setVideoEnabled] = useState(() => {
     const saved = sessionStorage.getItem('videoEnabled')
     return saved === null ? true : saved === 'true'
@@ -62,29 +64,26 @@ const useWebRTC = (roomId, userName) => {
     }
 
     // Use dynamic ICE servers from backend (includes TURN if configured)
-    const pc = new RTCPeerConnection({ iceServers: iceServersRef.current })
+    const pc = new RTCPeerConnection({
+      iceServers: iceServersRef.current,
+      iceCandidatePoolSize: 10, // Pre-gather candidates for faster connection
+    })
 
     // Initialize ICE candidate queue for this peer
     iceCandidateQueues.current[peerId] = []
 
-    // Flag to suppress onnegotiationneeded during initial track setup.
-    // The initial offer is sent manually after createPeerConnection returns,
-    // so we don't want onnegotiationneeded to fire a duplicate offer.
-    // We clear the flag after a macrotask delay because onnegotiationneeded
-    // is fired asynchronously (queued task), so a synchronous flag reset
-    // would clear too early and fail to suppress the initial event.
-    let isSettingUp = true
+    // Track whether the initial offer has been sent manually.
+    // onnegotiationneeded is suppressed until the initial offer is sent,
+    // then allowed for all subsequent renegotiations (camera on/off, etc.)
+    // Stored as a property on pc so the room-joined handler can set it externally.
+    pc._initialOfferSent = false
 
-        // Add local tracks (always use localStreamRef which has the real camera stream)
-        if (localStreamRef.current) {
-          localStreamRef.current.getTracks().forEach(track => {
-            pc.addTrack(track, localStreamRef.current)
-          })
-        }
-
-    // Defer clearing the flag so the initial onnegotiationneeded (fired async) is suppressed,
-    // but subsequent ones (from mid-call addTrack) are allowed through.
-    setTimeout(() => { isSettingUp = false }, 0)
+    // Add local tracks (always use localStreamRef which has the real camera stream)
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        pc.addTrack(track, localStreamRef.current)
+      })
+    }
 
     // Handle remote stream - fires for each incoming track
     pc.ontrack = (event) => {
@@ -167,22 +166,29 @@ const useWebRTC = (roomId, userName) => {
     // This is the standard WebRTC renegotiation trigger — handles both:
     //   • A late joiner turning their own camera ON (their side fires this)
     //   • An existing user turning camera ON after a late joiner connected (their side fires this)
+    pc._negotiationPending = false
     pc.onnegotiationneeded = async () => {
-      // Skip during initial setup — the caller sends the first offer manually
-      if (isSettingUp) {
-        console.log(`[WebRTC] onnegotiationneeded suppressed during setup for ${peerId}`)
+      // Skip until the initial offer has been sent manually (from room-joined handler).
+      // After that, allow all renegotiations (camera on/off, screen share, etc.)
+      if (!pc._initialOfferSent) {
+        console.log(`[WebRTC] onnegotiationneeded suppressed (initial offer not yet sent) for ${peerId}`)
         return
       }
-      // Only the offerer side should initiate — skip if we're currently answering
+      // If not stable, mark pending and wait — the answer handler will trigger a retry
       if (pc.signalingState !== 'stable') {
-        console.log(`[WebRTC] onnegotiationneeded skipped for ${peerId} (state=${pc.signalingState})`)
+        console.log(`[WebRTC] onnegotiationneeded deferred for ${peerId} (state=${pc.signalingState})`)
+        pc._negotiationPending = true
         return
       }
+      pc._negotiationPending = false
       console.log(`[WebRTC] onnegotiationneeded for ${peerId} — sending renegotiation offer`)
       try {
         const offer = await pc.createOffer()
         // Guard: state may have changed while awaiting
-        if (pc.signalingState !== 'stable') return
+        if (pc.signalingState !== 'stable') {
+          pc._negotiationPending = true
+          return
+        }
         await pc.setLocalDescription(offer)
         socketRef.current?.emit('offer', { targetId: peerId, offer })
       } catch (err) {
@@ -249,6 +255,8 @@ const useWebRTC = (roomId, userName) => {
           if (audioTrack) audioTrack.enabled = false
         }
 
+        // Video is ON by default on first join (savedVideo === null → true).
+        // Only stop the video track if the user explicitly turned it OFF in this session.
         if (savedVideo === 'false') {
           // Stop the video track entirely so camera light turns off
           const videoTrack = stream.getVideoTracks()[0]
@@ -276,6 +284,7 @@ const useWebRTC = (roomId, userName) => {
           joinedRoom = true
           // Send actual initial media state so the server stores the correct values.
           // Late joiners will see the correct camera/mic state in the participant list.
+          // Audio defaults to true (null → true), video defaults to true (null → true).
           const initAudio = sessionStorage.getItem('audioEnabled') !== 'false'
           const initVideo = sessionStorage.getItem('videoEnabled') !== 'false'
           socket.emit('join-room', { roomId, userName, audioEnabled: initAudio, videoEnabled: initVideo })
@@ -346,8 +355,12 @@ const useWebRTC = (roomId, userName) => {
               const offer = await pc.createOffer()
               await pc.setLocalDescription(offer)
               socket.emit('offer', { targetId: participant.id, offer })
+              // Mark initial offer as sent — onnegotiationneeded can now fire for renegotiations
+              pc._initialOfferSent = true
             } catch (err) {
               console.error(`[WebRTC] Error creating offer for ${participant.id}:`, err)
+              // Still mark as sent so renegotiation isn't permanently blocked
+              pc._initialOfferSent = true
             }
           }))
         })
@@ -421,6 +434,8 @@ const useWebRTC = (roomId, userName) => {
             const answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
             socket.emit('answer', { targetId: fromId, answer })
+            // Mark as ready for renegotiation — answerer side is now fully connected
+            pc._initialOfferSent = true
           } catch (err) {
             console.error(`[WebRTC] Error handling offer from ${fromId}:`, err)
           }
@@ -439,6 +454,23 @@ const useWebRTC = (roomId, userName) => {
           try {
             await pc.setRemoteDescription(new RTCSessionDescription(answer))
             await flushIceCandidates(fromId, pc)
+            // If a renegotiation was deferred while we were waiting for this answer,
+            // trigger it now that we're back in stable state
+            if (pc._negotiationPending) {
+              console.log(`[WebRTC] Triggering deferred negotiation for ${fromId}`)
+              pc._negotiationPending = false
+              if (pc.signalingState === 'stable') {
+                try {
+                  const offer = await pc.createOffer()
+                  if (pc.signalingState !== 'stable') return
+                  await pc.setLocalDescription(offer)
+                  socketRef.current?.emit('offer', { targetId: fromId, offer })
+                  console.log(`[WebRTC] Deferred renegotiation offer sent to ${fromId}`)
+                } catch (err) {
+                  console.error(`[WebRTC] Deferred renegotiation failed for ${fromId}:`, err)
+                }
+              }
+            }
           } catch (err) {
             console.error(`[WebRTC] Error handling answer from ${fromId}:`, err)
           }
@@ -545,21 +577,23 @@ const useWebRTC = (roomId, userName) => {
     if (!localStreamRef.current) return
     // Don't allow toggling camera while screen sharing is active
     if (isScreenSharing) return
-    const videoTrack = localStreamRef.current.getVideoTracks()[0]
 
     if (videoEnabled) {
-      // TURN OFF: Stop the track completely to turn off camera hardware light
+      // ── TURN OFF ──────────────────────────────────────────────────────────
+      const videoTrack = localStreamRef.current.getVideoTracks()[0]
       if (videoTrack) {
-        videoTrack.stop() // This turns off the camera light
+        videoTrack.stop() // Turns off camera hardware light
         localStreamRef.current.removeTrack(videoTrack)
       }
 
-      // Send a null/black track to peers so connection stays alive
+      // Null out the video sender in all peer connections.
+      // replaceTrack(null) keeps the transceiver alive so we can restore later.
       Object.values(peerConnectionsRef.current).forEach(pc => {
-        const sender = pc.getSenders().find(s => s.track?.kind === 'video')
-        if (sender) {
-          // Replace with a silent black track to keep the connection
-          sender.replaceTrack(null).catch(() => {})
+        const videoSender = pc.getSenders().find(s =>
+          (s.track && s.track.kind === 'video') || s.track === null
+        )
+        if (videoSender) {
+          videoSender.replaceTrack(null).catch(() => {})
         }
       })
 
@@ -567,42 +601,54 @@ const useWebRTC = (roomId, userName) => {
       sessionStorage.setItem('videoEnabled', 'false')
       setLocalStream(new MediaStream(localStreamRef.current.getTracks()))
       socketRef.current?.emit('media-state-change', { roomId, audioEnabled, videoEnabled: false })
+
     } else {
-      // TURN ON: Request camera access again
+      // ── TURN ON ───────────────────────────────────────────────────────────
       try {
         const newStream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 1280 }, height: { ideal: 720 } },
         })
         const newVideoTrack = newStream.getVideoTracks()[0]
 
-        // Add new track to local stream
+        // Add to local stream reference and update camera track ref
         localStreamRef.current.addTrack(newVideoTrack)
-        // Update camera track reference
         cameraTrackRef.current = newVideoTrack
 
-        // Replace null/old sender with new track in all peer connections
-        const replacePromises = Object.entries(peerConnectionsRef.current).map(async ([peerId, pc]) => {
-          const sender = pc.getSenders().find(s => s.track?.kind === 'video' || s.track === null)
-          if (sender) {
-            // Existing video sender (possibly null) — replaceTrack does NOT trigger onnegotiationneeded,
-            // so the remote side sees the new track without a full renegotiation round-trip.
-            return sender.replaceTrack(newVideoTrack)
+        // Update all peer connections
+        for (const [peerId, pc] of Object.entries(peerConnectionsRef.current)) {
+          // Find any existing video sender — including ones with track === null
+          // (from a previous replaceTrack(null) call when camera was turned off)
+          const videoSender = pc.getSenders().find(s =>
+            (s.track && s.track.kind === 'video') || s.track === null
+          )
+
+          if (videoSender) {
+            // ── Case 1: Sender exists (possibly with null track) ──
+            // replaceTrack does NOT trigger renegotiation — remote side
+            // already has a video transceiver and will start receiving frames.
+            try {
+              await videoSender.replaceTrack(newVideoTrack)
+              console.log(`[WebRTC] replaceTrack video → ${peerId}`)
+            } catch (e) {
+              console.warn(`[WebRTC] replaceTrack failed for ${peerId}:`, e.message)
+            }
           } else {
-            // No video sender exists (peer joined while camera was off).
-            // addTrack will automatically fire onnegotiationneeded on this PC,
-            // which sends a renegotiation offer to the remote peer.
+            // ── Case 2: No video sender at all ──
+            // Peer connected while camera was completely off (no video transceiver).
+            // addTrack will trigger onnegotiationneeded which sends the renegotiation offer.
+            // The onnegotiationneeded handler in createPeerConnection handles this correctly.
+            console.log(`[WebRTC] addTrack video for ${peerId} — onnegotiationneeded will renegotiate`)
             pc.addTrack(newVideoTrack, localStreamRef.current)
-            // Do NOT manually createOffer here — onnegotiationneeded handles it.
+            // onnegotiationneeded fires asynchronously and sends the offer automatically
           }
-        })
-        await Promise.all(replacePromises)
+        }
 
         setVideoEnabled(true)
         sessionStorage.setItem('videoEnabled', 'true')
         setLocalStream(new MediaStream(localStreamRef.current.getTracks()))
         socketRef.current?.emit('media-state-change', { roomId, audioEnabled, videoEnabled: true })
       } catch (err) {
-        console.error('Error enabling video:', err)
+        console.error('[WebRTC] Error enabling video:', err)
       }
     }
   }, [roomId, audioEnabled, videoEnabled, isScreenSharing])
@@ -651,16 +697,27 @@ const useWebRTC = (roomId, userName) => {
         if (!localStreamRef.current.getTracks().includes(cameraTrack)) {
           localStreamRef.current.addTrack(cameraTrack)
         }
-        // Restore camera track in all peer connections
-        // Peers with no video sender (joined while camera was off) get addTrack,
-        // which fires onnegotiationneeded for automatic renegotiation.
-        const restorePromises = Object.values(peerConnectionsRef.current).map(pc => {
+        // Restore camera track in all peer connections SEQUENTIALLY to avoid
+        // concurrent signalingState conflicts when multiple peers need renegotiation.
+        for (const [peerId, pc] of Object.entries(peerConnectionsRef.current)) {
           const sender = pc.getSenders().find(s => s.track?.kind === 'video' || s.track === null)
-          if (sender) return sender.replaceTrack(cameraTrack)
-          pc.addTrack(cameraTrack, localStreamRef.current) // triggers onnegotiationneeded
-          return Promise.resolve()
-        })
-        await Promise.all(restorePromises)
+          if (sender) {
+            try { await sender.replaceTrack(cameraTrack) } catch (e) { /* ignore */ }
+          } else {
+            pc.addTrack(cameraTrack, localStreamRef.current)
+            try {
+              if (pc.signalingState === 'stable') {
+                const offer = await pc.createOffer()
+                if (pc.signalingState !== 'stable') continue
+                await pc.setLocalDescription(offer)
+                socketRef.current?.emit('offer', { targetId: peerId, offer })
+                console.log(`[WebRTC] Sent renegotiation offer to ${peerId} after screen share restore`)
+              }
+            } catch (err) {
+              console.error(`[WebRTC] Renegotiation offer failed for ${peerId} (screen restore):`, err)
+            }
+          }
+        }
       }
 
       setVideoEnabled(true)
@@ -695,27 +752,39 @@ const useWebRTC = (roomId, userName) => {
         // Save video state before screen share so we can restore it correctly
         videoEnabledBeforeScreenShare.current = videoEnabled
 
-        // Replace video track in ALL existing peer connections
-        const replacePromises = Object.values(peerConnectionsRef.current).map(pc => {
-          const sender = pc.getSenders().find(s => s.track?.kind === 'video' || s.track === null)
-          if (sender) {
-            // Existing video sender — replaceTrack swaps the track without renegotiation
-            return sender.replaceTrack(screenTrack)
-          } else {
-            // No video sender (peer joined while camera was off).
-            // addTrack fires onnegotiationneeded automatically — no manual offer needed.
-            pc.addTrack(screenTrack, localStreamRef.current)
-            return Promise.resolve()
-          }
-        })
-        await Promise.all(replacePromises)
-
-        // Replace the video track in localStreamRef so new peer connections get the screen track
+        // Step 1: Update localStreamRef FIRST so the screen track is in the stream
+        // before we reference it in addTrack calls below.
         const oldVideoTracks = localStreamRef.current.getVideoTracks()
         oldVideoTracks.forEach(t => localStreamRef.current.removeTrack(t))
         localStreamRef.current.addTrack(screenTrack)
 
-        // Update local stream display to show screen share preview
+        // Step 2: Replace/add video track in ALL existing peer connections SEQUENTIALLY
+        // (sequential avoids concurrent signalingState conflicts when multiple peers
+        //  need addTrack + createOffer at the same time)
+        for (const [peerId, pc] of Object.entries(peerConnectionsRef.current)) {
+          const sender = pc.getSenders().find(s => s.track?.kind === 'video' || s.track === null)
+          if (sender) {
+            // Existing video sender — replaceTrack swaps without renegotiation
+            try { await sender.replaceTrack(screenTrack) } catch (e) { /* ignore */ }
+          } else {
+            // No video sender (camera was off when this peer connected).
+            // addTrack + manual renegotiation.
+            pc.addTrack(screenTrack, localStreamRef.current)
+            try {
+              if (pc.signalingState === 'stable') {
+                const offer = await pc.createOffer()
+                if (pc.signalingState !== 'stable') continue
+                await pc.setLocalDescription(offer)
+                socketRef.current?.emit('offer', { targetId: peerId, offer })
+                console.log(`[WebRTC] Sent renegotiation offer to ${peerId} for screen share start`)
+              }
+            } catch (err) {
+              console.error(`[WebRTC] Renegotiation offer failed for ${peerId} (screen share):`, err)
+            }
+          }
+        }
+
+        // Step 3: Update local stream display to show screen share preview
         setLocalStream(new MediaStream(localStreamRef.current.getTracks()))
         setIsScreenSharing(true)
         setVideoEnabled(true) // Screen share counts as "video on" for display purposes

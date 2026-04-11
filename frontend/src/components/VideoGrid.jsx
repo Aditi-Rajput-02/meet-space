@@ -1,37 +1,102 @@
-import React, { useRef, useEffect } from 'react'
+import React, { useRef, useEffect, useState } from 'react'
 import './VideoGrid.css'
 
 const VideoTile = ({ stream, userName, isLocal, isScreenSharing, audioEnabled, videoEnabled, handRaised }) => {
   const videoRef = useRef(null)
+  const [trackMuted, setTrackMuted] = useState(false)
 
   useEffect(() => {
     if (!videoRef.current) return
 
     if (stream) {
-      // Always reassign srcObject to pick up track replacements (screen share)
       videoRef.current.srcObject = stream
       videoRef.current.play().catch(() => {})
+
+      const checkMuteState = () => {
+        const vt = stream.getVideoTracks()
+        setTrackMuted(vt.length === 0 || vt.every(t => t.muted))
+      }
+
+      // Initial mute state
+      checkMuteState()
+
+      // Listen for track-level mute/unmute events
+      const attachTrackListeners = (track) => {
+        track.addEventListener('mute', checkMuteState)
+        track.addEventListener('unmute', checkMuteState)
+        track.addEventListener('ended', checkMuteState)
+      }
+      const detachTrackListeners = (track) => {
+        track.removeEventListener('mute', checkMuteState)
+        track.removeEventListener('unmute', checkMuteState)
+        track.removeEventListener('ended', checkMuteState)
+      }
+
+      // Attach to all current video tracks
+      stream.getVideoTracks().forEach(attachTrackListeners)
+
+      // When tracks are added/removed, re-check and re-attach listeners
+      const onAddTrack = (e) => {
+        if (e.track.kind === 'video') {
+          attachTrackListeners(e.track)
+        }
+        checkMuteState()
+      }
+      const onRemoveTrack = (e) => {
+        if (e.track.kind === 'video') {
+          detachTrackListeners(e.track)
+        }
+        checkMuteState()
+      }
+
+      stream.addEventListener('addtrack', onAddTrack)
+      stream.addEventListener('removetrack', onRemoveTrack)
+
+      return () => {
+        stream.removeEventListener('addtrack', onAddTrack)
+        stream.removeEventListener('removetrack', onRemoveTrack)
+        stream.getVideoTracks().forEach(detachTrackListeners)
+      }
     } else {
       videoRef.current.srcObject = null
+      setTrackMuted(true)
     }
   }, [stream])
 
-  // When videoEnabled or isScreenSharing changes, ensure play is triggered
+  // Poll mute state every 500ms as a fallback for missed unmute events.
+  // replaceTrack(null→track) should fire 'unmute' but some browsers are unreliable.
+  useEffect(() => {
+    if (!stream || isLocal) return
+    const interval = setInterval(() => {
+      const vt = stream.getVideoTracks()
+      const muted = vt.length === 0 || vt.every(t => t.muted)
+      setTrackMuted(prev => prev !== muted ? muted : prev)
+    }, 500)
+    return () => clearInterval(interval)
+  }, [stream, isLocal])
+
+  // When videoEnabled or isScreenSharing changes, trigger play
   useEffect(() => {
     if (!videoRef.current || !stream) return
-    const videoTracks = stream.getVideoTracks()
-    if (videoTracks.length > 0 && (videoEnabled || isScreenSharing)) {
+    if ((videoEnabled !== false || isScreenSharing) && !trackMuted) {
       videoRef.current.play().catch(() => {})
     }
-  }, [videoEnabled, isScreenSharing, stream])
+  }, [videoEnabled, isScreenSharing, trackMuted, stream])
 
   const initials = userName
     ? userName.split(' ').map(n => n[0]).join('').toUpperCase().substring(0, 2)
     : '?'
 
-  // Show video if: stream exists AND (video is enabled OR currently screen sharing)
-  // This ensures screen share is visible even if the participant had video off before sharing
-  const showVideo = stream && (videoEnabled !== false || isScreenSharing)
+  // showVideo logic:
+  // - Local: controlled by videoEnabled prop (user's own toggle state)
+  // - Remote: use videoEnabled prop (from server participant state via socket)
+  //           AND track must not be muted (replaceTrack(null) mutes the receiver track)
+  //   Screen sharing always shows video.
+  const showVideo = isScreenSharing
+    ? !!stream
+    : isLocal
+      ? !!(stream && videoEnabled !== false)
+      : !!(stream && videoEnabled !== false && !trackMuted)
 
   return (
     <div className={`video-tile ${isLocal ? 'local' : 'remote'} ${isScreenSharing ? 'screen-sharing' : ''} ${handRaised ? 'hand-raised' : ''}`}>
@@ -109,16 +174,19 @@ const VideoGrid = ({
       {/* Remote videos */}
       {remoteEntries.map(([peerId, stream]) => {
         const participant = participants.find(p => p.id === peerId) || {}
+        // Default videoEnabled/audioEnabled to true if not set (participant just joined)
+        const pVideoEnabled = participant.videoEnabled !== undefined ? participant.videoEnabled : true
+        const pAudioEnabled = participant.audioEnabled !== undefined ? participant.audioEnabled : true
         return (
           <VideoTile
             key={peerId}
             stream={stream}
             userName={participant.name || 'Participant'}
             isLocal={false}
-            isScreenSharing={participant.isScreenSharing}
-            audioEnabled={participant.audioEnabled}
-            videoEnabled={participant.videoEnabled}
-            handRaised={participant.handRaised}
+            isScreenSharing={participant.isScreenSharing || false}
+            audioEnabled={pAudioEnabled}
+            videoEnabled={pVideoEnabled}
+            handRaised={participant.handRaised || false}
           />
         )
       })}
