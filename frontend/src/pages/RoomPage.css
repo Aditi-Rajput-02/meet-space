@@ -1,3 +1,4 @@
+/* ── Room Page Shell ────────────────────────────────────────────────────────── */
 .room-page {
   width: 100%;
   height: 100%;
@@ -7,28 +8,28 @@
   overflow: hidden;
 }
 
-/* Header */
+/* ── Header ─────────────────────────────────────────────────────────────────── */
 .room-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 20px;
+  padding: 0 16px;
   background: rgba(26, 26, 46, 0.98);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   flex-shrink: 0;
-  height: 56px;
-  gap: 12px;
+  height: 52px;
+  gap: 10px;
+  z-index: 10;
 }
 
 .room-info {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  min-width: 0;
 }
 
-.room-logo {
-  font-size: 1.3rem;
-}
+.room-logo { font-size: 1.2rem; flex-shrink: 0; }
 
 .room-name {
   font-size: 1rem;
@@ -37,6 +38,7 @@
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+  white-space: nowrap;
 }
 
 .room-id-badge {
@@ -49,7 +51,8 @@
   padding: 4px 10px;
   cursor: pointer;
   transition: all 0.2s;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
+  flex-shrink: 0;
 }
 
 .room-id-badge:hover {
@@ -63,14 +66,13 @@
   letter-spacing: 0.05em;
 }
 
-.copy-icon {
-  font-size: 0.75rem;
-}
+.copy-icon { font-size: 0.72rem; }
 
 .room-status {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .status-dot {
@@ -78,55 +80,50 @@
   height: 8px;
   border-radius: 50%;
   background: #888;
+  flex-shrink: 0;
 }
 
-.status-dot.connected {
-  background: #43e97b;
-  box-shadow: 0 0 6px rgba(67, 233, 123, 0.5);
-}
-
-.status-dot.connecting {
-  background: #ff9800;
-  animation: pulse 1.5s infinite;
-}
-
-.status-dot.error {
-  background: #f44336;
-}
+.status-dot.connected  { background: #43e97b; box-shadow: 0 0 6px rgba(67, 233, 123, 0.5); }
+.status-dot.connecting { background: #ff9800; animation: pulse 1.5s infinite; }
+.status-dot.error      { background: #f44336; }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  50%       { opacity: 0.4; }
 }
 
 .status-text {
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   color: rgba(255, 255, 255, 0.5);
+  white-space: nowrap;
 }
 
 .participant-count {
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   color: rgba(255, 255, 255, 0.6);
   background: rgba(255, 255, 255, 0.06);
-  padding: 3px 10px;
+  padding: 3px 9px;
   border-radius: 20px;
+  white-space: nowrap;
 }
 
-/* Main */
+/* ── Main Area ──────────────────────────────────────────────────────────────── */
 .room-main {
   flex: 1;
   display: flex;
   overflow: hidden;
   min-height: 0;
+  position: relative;
 }
 
 .video-area {
   flex: 1;
   overflow: hidden;
   min-width: 0;
+  min-height: 0;
 }
 
-/* Side Panel */
+/* ── Side Panel ─────────────────────────────────────────────────────────────── */
 .side-panel {
   width: 320px;
   flex-shrink: 0;
@@ -137,24 +134,7 @@
   overflow: hidden;
 }
 
-@media (max-width: 768px) {
-  .side-panel {
-    position: fixed;
-    right: 0;
-    top: 56px;
-    bottom: 72px;
-    width: 100%;
-    max-width: 360px;
-    z-index: 100;
-    box-shadow: -4px 0 20px rgba(0, 0, 0, 0.4);
-  }
-
-  .room-id-badge {
-    display: none;
-  }
-}
-
-/* ── Name Prompt (shown when joining via direct URL) ── */
+/* ── Name Prompt Overlay ────────────────────────────────────────────────────── */
 .room-name-prompt-overlay {
   width: 100%;
   height: 100%;
@@ -162,14 +142,15 @@
   align-items: center;
   justify-content: center;
   background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
-  padding: 24px;
+  padding: 20px;
+  box-sizing: border-box;
 }
 
 .room-name-prompt-modal {
   background: rgba(26, 26, 46, 0.98);
   border: 1px solid rgba(124, 106, 247, 0.25);
   border-radius: 24px;
-  padding: 40px 36px;
+  padding: 36px 32px;
   width: 100%;
   max-width: 420px;
   text-align: center;
@@ -183,20 +164,20 @@
 }
 
 .room-name-prompt-logo {
-  font-size: 3rem;
-  margin-bottom: 12px;
+  font-size: 2.8rem;
+  margin-bottom: 10px;
   filter: drop-shadow(0 0 16px rgba(124, 106, 247, 0.5));
 }
 
 .room-name-prompt-modal h2 {
-  font-size: 1.6rem;
+  font-size: 1.5rem;
   font-weight: 700;
   color: #fff;
   margin: 0 0 8px;
 }
 
 .room-name-prompt-room {
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   color: rgba(255, 255, 255, 0.45);
   margin: 0 0 4px;
 }
@@ -208,19 +189,19 @@
 }
 
 .room-name-prompt-sub {
-  font-size: 0.9rem;
+  font-size: 0.88rem;
   color: rgba(255, 255, 255, 0.5);
-  margin: 0 0 28px;
+  margin: 0 0 24px;
 }
 
 .room-name-prompt-field {
   text-align: left;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
 }
 
 .room-name-prompt-field label {
   display: block;
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   font-weight: 600;
   color: rgba(255, 255, 255, 0.55);
   text-transform: uppercase;
@@ -230,7 +211,7 @@
 
 .room-name-prompt-field input {
   width: 100%;
-  padding: 13px 16px;
+  padding: 12px 14px;
   background: rgba(255, 255, 255, 0.07);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 12px;
@@ -253,17 +234,17 @@
 
 .room-name-prompt-actions {
   display: flex;
-  gap: 12px;
+  gap: 10px;
 }
 
 .btn-prompt-back {
   flex: 1;
-  padding: 13px;
+  padding: 12px;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 12px;
   color: rgba(255, 255, 255, 0.65);
-  font-size: 0.95rem;
+  font-size: 0.92rem;
   cursor: pointer;
   transition: background 0.2s;
   font-family: inherit;
@@ -272,18 +253,83 @@
 
 .btn-prompt-join {
   flex: 2;
-  padding: 13px;
+  padding: 12px;
   background: linear-gradient(135deg, #7c6af7, #5b4fcf);
   border: none;
   border-radius: 12px;
   color: #fff;
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 600;
   cursor: pointer;
   transition: opacity 0.2s, transform 0.1s;
   box-shadow: 0 4px 20px rgba(124, 106, 247, 0.35);
   font-family: inherit;
 }
-.btn-prompt-join:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); }
+.btn-prompt-join:hover:not(:disabled)  { opacity: 0.9; transform: translateY(-1px); }
 .btn-prompt-join:active:not(:disabled) { transform: translateY(0); }
 .btn-prompt-join:disabled { opacity: 0.38; cursor: not-allowed; }
+
+/* ── Tablet (≤ 900px) ───────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .side-panel { width: 280px; }
+}
+
+/* ── Mobile (≤ 768px) ───────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .room-header {
+    height: 48px;
+    padding: 0 12px;
+  }
+
+  /* Side panel slides in as overlay on mobile */
+  .side-panel {
+    position: fixed;
+    right: 0;
+    top: 48px;
+    bottom: 64px; /* matches controls-bar height at ≤768px */
+    width: min(100vw, 360px);
+    z-index: 200;
+    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.5);
+    border-left: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  /* Hide room ID badge on mobile — shown in info panel instead */
+  .room-id-badge { display: none; }
+
+  .room-name { font-size: 0.92rem; }
+  .status-text { display: none; }
+  .participant-count { font-size: 0.78rem; padding: 2px 7px; }
+}
+
+/* ── Small mobile (≤ 480px) ─────────────────────────────────────────────────── */
+@media (max-width: 480px) {
+  .room-header { height: 44px; padding: 0 10px; }
+  .room-logo { font-size: 1rem; }
+  .room-name { font-size: 0.85rem; }
+
+  .side-panel {
+    top: 44px;
+    bottom: 60px;
+    width: 100vw;
+  }
+
+  .room-name-prompt-modal {
+    padding: 28px 20px;
+    border-radius: 18px;
+  }
+
+  .room-name-prompt-logo { font-size: 2.2rem; }
+  .room-name-prompt-modal h2 { font-size: 1.3rem; }
+  .room-name-prompt-sub { font-size: 0.82rem; margin-bottom: 18px; }
+  .room-name-prompt-field input { padding: 11px 12px; font-size: 0.95rem; }
+  .btn-prompt-back, .btn-prompt-join { padding: 11px; font-size: 0.88rem; }
+}
+
+/* ── Very small phones (≤ 360px) ───────────────────────────────────────────── */
+@media (max-width: 360px) {
+  .room-name-prompt-overlay { padding: 12px; }
+  .room-name-prompt-modal { padding: 22px 16px; }
+  .room-name-prompt-actions { flex-direction: column; }
+  .btn-prompt-back, .btn-prompt-join { flex: none; width: 100%; }
+}

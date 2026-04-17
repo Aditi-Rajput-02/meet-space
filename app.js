@@ -96,65 +96,108 @@ function isOriginAllowed(origin) {
   return ALLOWED_ORIGINS.includes(origin);
 }
 
-// Metered.ca API key for fetching TURN credentials
-const METERED_API_KEY = process.env.METERED_API_KEY || '771067a8b5f5d3459e1022433626722ca050';
-const METERED_API_URL = `https://meetconnect.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`;
+// ─── SELF-HOSTED COTURN CONFIGURATION ────────────────────────────────────────
+// Uses coturn (https://github.com/coturn/coturn) with HMAC-SHA1 time-limited
+// credentials (RFC 8489 REST API style). The same shared secret is configured
+// in turnserver.conf → static-auth-secret.
+//
+// Credential format:
+//   username = "<unix_timestamp_expiry>:<random_user>"
+//   password = base64( HMAC-SHA1( static-auth-secret, username ) )
+//
+// This means credentials are self-expiring — no external API calls needed.
+const crypto = require('crypto');
 
-// Cache for TURN credentials fetched from Metered.ca API
-let cachedIceServers = null;
-let iceServersCacheExpiry = 0;
+const TURN_HOST     = process.env.TURN_HOST     || 'YOUR_SERVER_PUBLIC_IP';
+const TURN_PORT     = process.env.TURN_PORT     || '3478';
+const TURN_TLS_PORT = process.env.TURN_TLS_PORT && process.env.TURN_TLS_PORT.trim() !== '' ? process.env.TURN_TLS_PORT.trim() : null;
+const TURN_SECRET   = process.env.TURN_SECRET   || 'CHANGE_THIS_TO_A_LONG_RANDOM_SECRET_STRING';
+const TURN_TTL      = parseInt(process.env.TURN_TTL || '86400', 10); // seconds (default 24h)
 
-// Fetch TURN credentials from Metered.ca REST API (cached for 12 hours)
-async function fetchMeteredIceServers() {
-  if (cachedIceServers && Date.now() < iceServersCacheExpiry) {
-    return cachedIceServers;
-  }
-  try {
-    const https = require('https');
-    const data = await new Promise((resolve, reject) => {
-      https.get(METERED_API_URL, (res) => {
-        let body = '';
-        res.on('data', chunk => body += chunk);
-        res.on('end', () => {
-          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
-        });
-      }).on('error', reject);
-    });
-    if (Array.isArray(data) && data.length > 0) {
-      // Prepend Google STUN servers for reliability
-      cachedIceServers = [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        ...data,
-      ];
-      iceServersCacheExpiry = Date.now() + 12 * 60 * 60 * 1000; // 12 hours
-      console.log(`[TURN] Fetched ${data.length} ICE servers from Metered.ca`);
-      return cachedIceServers;
+/**
+ * Generate time-limited HMAC-SHA1 TURN credentials.
+ * Compatible with coturn's use-auth-secret / static-auth-secret mode.
+ *
+ * @param {string} userId  - Arbitrary identifier (e.g. socket ID or "meetspace")
+ * @returns {{ username: string, credential: string, ttl: number }}
+ */
+function generateTurnCredentials(userId = 'meetspace') {
+  const expiry   = Math.floor(Date.now() / 1000) + TURN_TTL;
+  const username = `${expiry}:${userId}`;
+  const credential = crypto
+    .createHmac('sha1', TURN_SECRET)
+    .update(username)
+    .digest('base64');
+  return { username, credential, ttl: TURN_TTL };
+}
+
+/**
+ * Build the full ICE server list for a client.
+ * Includes STUN servers (free, no auth) + self-hosted TURN (with HMAC creds).
+ *
+ * @param {string} userId - Used to personalise the TURN username (optional)
+ * @returns {Array} ICE server objects ready for RTCPeerConnection
+ */
+function buildIceServers(userId = 'meetspace') {
+  const { username, credential } = generateTurnCredentials(userId);
+
+  const turnServers = [];
+
+  // Only add TURN entries if a real host is configured
+  if (TURN_HOST && TURN_HOST !== 'YOUR_SERVER_PUBLIC_IP') {
+    turnServers.push(
+      // UDP (fastest, preferred)
+      {
+        urls: `turn:${TURN_HOST}:${TURN_PORT}?transport=udp`,
+        username,
+        credential,
+      },
+      // TCP fallback (works through most firewalls)
+      {
+        urls: `turn:${TURN_HOST}:${TURN_PORT}?transport=tcp`,
+        username,
+        credential,
+      },
+      // STUN on same host (no auth needed)
+      {
+        urls: `stun:${TURN_HOST}:${TURN_PORT}`,
+      }
+    );
+
+    // TLS variants — only add if TLS port is configured
+    if (TURN_TLS_PORT) {
+      turnServers.push(
+        {
+          urls: `turns:${TURN_HOST}:${TURN_TLS_PORT}?transport=tcp`,
+          username,
+          credential,
+        },
+        {
+          urls: `turns:${TURN_HOST}:${TURN_TLS_PORT}?transport=udp`,
+          username,
+          credential,
+        }
+      );
     }
-  } catch (err) {
-    console.warn('[TURN] Failed to fetch Metered.ca ICE servers:', err.message);
   }
-  // Fallback: STUN only
+
   return [
+    // Public STUN servers — always include as first-choice (free, no relay)
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
+    // Self-hosted TURN relay (used only when STUN fails, e.g. symmetric NAT)
+    ...turnServers,
   ];
 }
 
-// Synchronous fallback using last cached value (for startup log)
-function buildIceServers() {
-  return cachedIceServers || [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' },
-  ];
+// Async wrapper kept for API compatibility with the join-room handler
+async function fetchMeteredIceServers(userId = 'meetspace') {
+  return buildIceServers(userId);
 }
 
-// Pre-fetch ICE servers at startup
-fetchMeteredIceServers().then(servers => {
-  console.log(`[TURN] ICE servers ready: ${servers.length} total`);
-}).catch(() => {});
+console.log(`[TURN] Self-hosted coturn configured at ${TURN_HOST}:${TURN_PORT}`);
+console.log(`[TURN] ICE servers ready: ${buildIceServers().length} total`);
 
 // Configure CORS — allow production domain + localhost for development
 app.use(cors({
@@ -564,5 +607,5 @@ server.listen(PORT, () => {
   console.log(`\n🚀 WebRTC Signaling Server running on port ${PORT}`);
   console.log(`📡 Accepting connections from: ${CLIENT_URL}`);
   console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-  console.log(`🧊 TURN credentials: fetched from Metered.ca API (meetconnect.metered.live)\n`);
+  console.log(`🧊 TURN server: self-hosted coturn at ${TURN_HOST}:${TURN_PORT} (HMAC-SHA1 credentials)\n`);
 });

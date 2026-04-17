@@ -1,3 +1,4 @@
+/* ── Video Grid ─────────────────────────────────────────────────────────────── */
 .video-grid {
   width: 100%;
   height: 100%;
@@ -7,12 +8,15 @@
   background: #0a0a14;
   box-sizing: border-box;
 }
-.video-grid.grid-1 { grid-template-columns: 1fr; }
-.video-grid.grid-2 { grid-template-columns: repeat(2, 1fr); }
-.video-grid.grid-4 { grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); }
-.video-grid.grid-6 { grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(2, 1fr); }
+
+/* Grid layouts — desktop */
+.video-grid.grid-1  { grid-template-columns: 1fr; }
+.video-grid.grid-2  { grid-template-columns: repeat(2, 1fr); }
+.video-grid.grid-4  { grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); }
+.video-grid.grid-6  { grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(2, 1fr); }
 .video-grid.grid-many { grid-template-columns: repeat(4, 1fr); grid-auto-rows: 1fr; }
 
+/* ── Video Tile ─────────────────────────────────────────────────────────────── */
 .video-tile {
   position: relative;
   background: #1a1a2e;
@@ -20,12 +24,15 @@
   overflow: hidden;
   border: 2px solid transparent;
   transition: border-color 0.2s ease;
+  min-height: 0; /* allow shrinking in grid */
 }
-.video-tile.local { border-color: rgba(108, 99, 255, 0.3); }
-.video-tile.screen-sharing { border-color: rgba(67, 233, 123, 0.5); }
-.video-tile.hand-raised { border-color: #f5c518; box-shadow: 0 0 0 2px rgba(245, 197, 24, 0.25); }
-.video-tile:hover { border-color: rgba(108, 99, 255, 0.5); }
 
+.video-tile.local        { border-color: rgba(108, 99, 255, 0.3); }
+.video-tile.screen-sharing { border-color: rgba(67, 233, 123, 0.5); }
+.video-tile.hand-raised  { border-color: #f5c518; box-shadow: 0 0 0 2px rgba(245, 197, 24, 0.25); }
+.video-tile:hover        { border-color: rgba(108, 99, 255, 0.5); }
+
+/* ── Video Element ──────────────────────────────────────────────────────────── */
 .video-element {
   width: 100%;
   height: 100%;
@@ -35,6 +42,7 @@
 }
 .video-tile.remote .video-element { transform: none; }
 
+/* ── Avatar (camera off) ────────────────────────────────────────────────────── */
 .video-avatar {
   width: 100%;
   height: 100%;
@@ -43,9 +51,10 @@
   justify-content: center;
   background: linear-gradient(135deg, #1a1a2e, #16213e);
 }
+
 .avatar-circle {
-  width: 80px;
-  height: 80px;
+  width: clamp(48px, 10vw, 80px);
+  height: clamp(48px, 10vw, 80px);
   border-radius: 50%;
   background: linear-gradient(135deg, #6c63ff, #ff6584);
   display: flex;
@@ -53,58 +62,74 @@
   justify-content: center;
   box-shadow: 0 8px 32px rgba(108, 99, 255, 0.3);
 }
-.avatar-initials { font-size: 1.8rem; font-weight: 700; color: white; text-transform: uppercase; }
 
+.avatar-initials {
+  font-size: clamp(1rem, 3vw, 1.8rem);
+  font-weight: 700;
+  color: white;
+  text-transform: uppercase;
+}
+
+/* ── Tile Overlay (name + indicators) ──────────────────────────────────────── */
 .tile-overlay {
   position: absolute;
   bottom: 0;
   left: 0;
   right: 0;
-  padding: 8px 12px;
+  padding: 6px 10px;
   background: linear-gradient(transparent, rgba(0,0,0,0.7));
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
+
 .tile-name {
-  font-size: 0.8rem;
+  font-size: clamp(0.65rem, 1.5vw, 0.8rem);
   font-weight: 500;
   color: white;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 70%;
 }
+
 .screen-badge {
-  font-size: 0.7rem;
+  font-size: 0.65rem;
   background: rgba(67, 233, 123, 0.2);
   border: 1px solid rgba(67, 233, 123, 0.4);
   border-radius: 4px;
   padding: 1px 5px;
   color: #43e97b;
+  flex-shrink: 0;
 }
-.tile-indicators { display: flex; gap: 4px; }
-.indicator { font-size: 0.85rem; background: rgba(0,0,0,0.5); border-radius: 4px; padding: 2px 4px; }
-.indicator.muted { background: rgba(244, 67, 54, 0.3); }
-.indicator.hand { background: rgba(245, 197, 24, 0.25); border: 1px solid rgba(245, 197, 24, 0.5); }
 
-/* Raised hand badge in top-left corner of tile */
+.tile-indicators { display: flex; gap: 4px; }
+.indicator {
+  font-size: 0.8rem;
+  background: rgba(0,0,0,0.5);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+.indicator.muted { background: rgba(244, 67, 54, 0.3); }
+.indicator.hand  { background: rgba(245, 197, 24, 0.25); border: 1px solid rgba(245, 197, 24, 0.5); }
+
+/* ── Hand Raised Badge ──────────────────────────────────────────────────────── */
 .hand-raised-badge {
   position: absolute;
-  top: 10px;
-  left: 10px;
+  top: 8px;
+  left: 8px;
   background: #f5c518;
   color: #1a1a1a;
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 700;
   border-radius: 20px;
-  padding: 3px 10px 3px 6px;
+  padding: 3px 8px 3px 5px;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   box-shadow: 0 2px 8px rgba(245, 197, 24, 0.4);
   animation: handPulse 1.5s ease-in-out infinite;
   z-index: 2;
@@ -115,11 +140,42 @@
   50%       { box-shadow: 0 2px 16px rgba(245, 197, 24, 0.75); }
 }
 
-@media (max-width: 768px) {
-  .video-grid.grid-4, .video-grid.grid-6, .video-grid.grid-many { grid-template-columns: repeat(2, 1fr); }
-  .avatar-circle { width: 60px; height: 60px; }
-  .avatar-initials { font-size: 1.4rem; }
+/* ── Tablet (≤ 900px) ───────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .video-grid { gap: 5px; padding: 6px; }
+  .video-grid.grid-6    { grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(3, 1fr); }
+  .video-grid.grid-many { grid-template-columns: repeat(3, 1fr); }
 }
+
+/* ── Mobile landscape / small tablet (≤ 768px) ─────────────────────────────── */
+@media (max-width: 768px) {
+  .video-grid { gap: 4px; padding: 4px; }
+  .video-grid.grid-4,
+  .video-grid.grid-6,
+  .video-grid.grid-many { grid-template-columns: repeat(2, 1fr); }
+  .tile-overlay { padding: 4px 8px; }
+}
+
+/* ── Mobile portrait (≤ 480px) ─────────────────────────────────────────────── */
 @media (max-width: 480px) {
-  .video-grid.grid-2, .video-grid.grid-4 { grid-template-columns: 1fr; }
+  .video-grid { gap: 3px; padding: 3px; }
+  /* 1 person: full screen */
+  .video-grid.grid-1 { grid-template-columns: 1fr; }
+  /* 2 people: stack vertically for better face visibility */
+  .video-grid.grid-2 { grid-template-columns: 1fr; grid-template-rows: repeat(2, 1fr); }
+  /* 3-4 people: 2 columns */
+  .video-grid.grid-4 { grid-template-columns: repeat(2, 1fr); }
+  /* 5+ people: 2 columns */
+  .video-grid.grid-6,
+  .video-grid.grid-many { grid-template-columns: repeat(2, 1fr); }
+
+  .tile-name { font-size: 0.6rem; }
+  .indicator { font-size: 0.7rem; }
+  .hand-raised-badge { font-size: 0.6rem; padding: 2px 6px 2px 4px; top: 5px; left: 5px; }
+}
+
+/* ── Very small phones (≤ 360px) ───────────────────────────────────────────── */
+@media (max-width: 360px) {
+  .video-grid.grid-2 { grid-template-columns: 1fr; }
+  .tile-name { font-size: 0.55rem; }
 }

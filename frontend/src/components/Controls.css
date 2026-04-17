@@ -285,16 +285,16 @@
 .info-copy-btn:hover { background: rgba(77, 166, 255, 0.25); }
 
 /* ── Responsive ───────────────────────────────────────────────────────────── */
-@media (max-width: 700px) {
+@media (max-width: 768px) {
   .controls-bar {
     padding: 0 10px;
-    gap: 4px;
-    height: 72px;
+    gap: 6px;
+    height: 64px;
   }
 
   .ctrl-btn {
-    width: 46px;
-    height: 42px;
+    width: 48px;
+    height: 44px;
     border-radius: 12px;
   }
 
@@ -306,14 +306,79 @@
   .ctrl-label {
     font-size: 0.6rem;
   }
+
+  .ctrl-left-info {
+    min-width: 70px;
+  }
+
+  .ctrl-time {
+    font-size: 0.88rem;
+  }
+
+  .ctrl-room-code {
+    font-size: 0.62rem;
+  }
+
+  .info-panel {
+    right: 10px;
+    width: 260px;
+    bottom: 74px;
+  }
 }
 
 @media (max-width: 480px) {
+  .controls-bar {
+    padding: 0 6px;
+    gap: 4px;
+    height: 60px;
+  }
+
+  .ctrl-btn {
+    width: 42px;
+    height: 40px;
+    border-radius: 10px;
+  }
+
+  .ctrl-icon {
+    width: 20px;
+    height: 20px;
+  }
+
+  /* Hide labels on small phones to save space */
   .ctrl-label {
     display: none;
   }
 
+  /* Hide left info on very small screens */
+  .ctrl-left-info {
+    display: none;
+  }
+
+  .ctrl-btn.danger {
+    width: 42px;
+  }
+
+  .info-panel {
+    right: 6px;
+    width: calc(100vw - 12px);
+    bottom: 68px;
+  }
+}
+
+@media (max-width: 360px) {
   .controls-bar {
-    height: 64px;
+    gap: 3px;
+    height: 56px;
+  }
+
+  .ctrl-btn {
+    width: 38px;
+    height: 36px;
+    border-radius: 9px;
+  }
+
+  .ctrl-icon {
+    width: 18px;
+    height: 18px;
   }
 }
