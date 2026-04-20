@@ -1,3 +1,4 @@
+ 
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const express = require('express');
 const http = require('http');
@@ -6,82 +7,16 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
+const crypto     = require('crypto');
+const mediasoup  = require('mediasoup');
 
-const app = express();
+const app    = express();
 const server = http.createServer(app);
 
-// ─── SECURITY HEADERS ────────────────────────────────────────────────────────
-app.use((req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('X-XSS-Protection', '1; mode=block');
-  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  next();
-});
-
-// ─── SIMPLE IN-MEMORY RATE LIMITER ───────────────────────────────────────────
-const rateLimitMap = new Map();
-const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
-const RATE_LIMIT_MAX = 60; // max 60 requests per minute per IP
-
-function rateLimit(req, res, next) {
-  const ip = req.ip || req.socket.remoteAddress;
-  const now = Date.now();
-  const entry = rateLimitMap.get(ip) || { count: 0, start: now };
-
-  if (now - entry.start > RATE_LIMIT_WINDOW_MS) {
-    entry.count = 1;
-    entry.start = now;
-  } else {
-    entry.count++;
-  }
-
-  rateLimitMap.set(ip, entry);
-
-  if (entry.count > RATE_LIMIT_MAX) {
-    return res.status(429).json({ error: 'Too many requests. Please try again later.' });
-  }
-  next();
-}
-
-// Clean up rate limit map every 5 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, entry] of rateLimitMap.entries()) {
-    if (now - entry.start > RATE_LIMIT_WINDOW_MS * 2) {
-      rateLimitMap.delete(ip);
-    }
-  }
-}, 5 * 60 * 1000);
-
-// ─── SOCKET RATE LIMITER ─────────────────────────────────────────────────────
-const socketRateLimitMap = new Map();
-const SOCKET_RATE_LIMIT_WINDOW_MS = 10 * 1000; // 10 seconds
-// With 10 users: join triggers ~9 offers + 9 answers + ~50 ICE candidates per peer = ~70 events.
-// Raised from 30 → 120 to handle multi-peer signaling bursts without silently dropping events.
-const SOCKET_RATE_LIMIT_MAX = 120; // max 120 socket events per 10 seconds
-
-function socketRateLimit(socketId) {
-  const now = Date.now();
-  const entry = socketRateLimitMap.get(socketId) || { count: 0, start: now };
-
-  if (now - entry.start > SOCKET_RATE_LIMIT_WINDOW_MS) {
-    entry.count = 1;
-    entry.start = now;
-  } else {
-    entry.count++;
-  }
-
-  socketRateLimitMap.set(socketId, entry);
-  return entry.count <= SOCKET_RATE_LIMIT_MAX;
-}
-
-// iisnode passes a named pipe path via process.env.PORT (e.g. \\.\pipe\...)
-// Fall back to numeric port for local development
-const PORT = process.env.PORT || 5001;
+// ─── CONFIG ──────────────────────────────────────────────────────────────────
+const PORT       = process.env.PORT       || 5001;
 const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:3000';
 
-// Allow production domain + all localhost variants for local development
 const ALLOWED_ORIGINS = [
   CLIENT_URL,
   'http://localhost:3000',
@@ -92,520 +27,509 @@ const ALLOWED_ORIGINS = [
 ];
 
 function isOriginAllowed(origin) {
-  if (!origin) return true; // allow server-to-server / curl / same-origin
-  return ALLOWED_ORIGINS.includes(origin);
+  return true; // Allow all origins
 }
 
-// ─── SELF-HOSTED COTURN CONFIGURATION ────────────────────────────────────────
-// Uses coturn (https://github.com/coturn/coturn) with HMAC-SHA1 time-limited
-// credentials (RFC 8489 REST API style). The same shared secret is configured
-// in turnserver.conf → static-auth-secret.
-//
-// Credential format:
-//   username = "<unix_timestamp_expiry>:<random_user>"
-//   password = base64( HMAC-SHA1( static-auth-secret, username ) )
-//
-// This means credentials are self-expiring — no external API calls needed.
-const crypto = require('crypto');
+// ─── TURN / ICE CONFIG ───────────────────────────────────────────────────────
+const TURN_HOST     = process.env.TURN_HOST     || null;
+const TURN_PORT_NUM = process.env.TURN_PORT     || '3478';
+const TURN_TLS_PORT = process.env.TURN_TLS_PORT && process.env.TURN_TLS_PORT.trim() !== ''
+  ? process.env.TURN_TLS_PORT.trim() : null;
+const TURN_SECRET   = process.env.TURN_SECRET   || null;
+const TURN_TTL      = parseInt(process.env.TURN_TTL || '86400', 10);
 
-const TURN_HOST     = process.env.TURN_HOST     || 'YOUR_SERVER_PUBLIC_IP';
-const TURN_PORT     = process.env.TURN_PORT     || '3478';
-const TURN_TLS_PORT = process.env.TURN_TLS_PORT && process.env.TURN_TLS_PORT.trim() !== '' ? process.env.TURN_TLS_PORT.trim() : null;
-const TURN_SECRET   = process.env.TURN_SECRET   || 'CHANGE_THIS_TO_A_LONG_RANDOM_SECRET_STRING';
-const TURN_TTL      = parseInt(process.env.TURN_TTL || '86400', 10); // seconds (default 24h)
-
-/**
- * Generate time-limited HMAC-SHA1 TURN credentials.
- * Compatible with coturn's use-auth-secret / static-auth-secret mode.
- *
- * @param {string} userId  - Arbitrary identifier (e.g. socket ID or "meetspace")
- * @returns {{ username: string, credential: string, ttl: number }}
- */
 function generateTurnCredentials(userId = 'meetspace') {
+  if (!TURN_SECRET) return null;
   const expiry   = Math.floor(Date.now() / 1000) + TURN_TTL;
   const username = `${expiry}:${userId}`;
-  const credential = crypto
-    .createHmac('sha1', TURN_SECRET)
-    .update(username)
-    .digest('base64');
-  return { username, credential, ttl: TURN_TTL };
+  const credential = crypto.createHmac('sha1', TURN_SECRET).update(username).digest('base64');
+  return { username, credential };
 }
 
-/**
- * Build the full ICE server list for a client.
- * Includes STUN servers (free, no auth) + self-hosted TURN (with HMAC creds).
- *
- * @param {string} userId - Used to personalise the TURN username (optional)
- * @returns {Array} ICE server objects ready for RTCPeerConnection
- */
 function buildIceServers(userId = 'meetspace') {
-  const { username, credential } = generateTurnCredentials(userId);
-
-  const turnServers = [];
-
-  // Only add TURN entries if a real host is configured
-  if (TURN_HOST && TURN_HOST !== 'YOUR_SERVER_PUBLIC_IP') {
-    turnServers.push(
-      // UDP (fastest, preferred)
-      {
-        urls: `turn:${TURN_HOST}:${TURN_PORT}?transport=udp`,
-        username,
-        credential,
-      },
-      // TCP fallback (works through most firewalls)
-      {
-        urls: `turn:${TURN_HOST}:${TURN_PORT}?transport=tcp`,
-        username,
-        credential,
-      },
-      // STUN on same host (no auth needed)
-      {
-        urls: `stun:${TURN_HOST}:${TURN_PORT}`,
-      }
-    );
-
-    // TLS variants — only add if TLS port is configured
-    if (TURN_TLS_PORT) {
-      turnServers.push(
-        {
-          urls: `turns:${TURN_HOST}:${TURN_TLS_PORT}?transport=tcp`,
-          username,
-          credential,
-        },
-        {
-          urls: `turns:${TURN_HOST}:${TURN_TLS_PORT}?transport=udp`,
-          username,
-          credential,
-        }
-      );
-    }
-  }
-
-  return [
-    // Public STUN servers — always include as first-choice (free, no relay)
+  const servers = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
-    // Self-hosted TURN relay (used only when STUN fails, e.g. symmetric NAT)
-    ...turnServers,
   ];
+  if (TURN_HOST && TURN_SECRET) {
+    const creds = generateTurnCredentials(userId);
+    servers.push(
+      { urls: `turn:${TURN_HOST}:${TURN_PORT_NUM}?transport=udp`, ...creds },
+      { urls: `turn:${TURN_HOST}:${TURN_PORT_NUM}?transport=tcp`, ...creds },
+      { urls: `stun:${TURN_HOST}:${TURN_PORT_NUM}` }
+    );
+    if (TURN_TLS_PORT) {
+      servers.push(
+        { urls: `turns:${TURN_HOST}:${TURN_TLS_PORT}?transport=tcp`, ...creds },
+        { urls: `turns:${TURN_HOST}:${TURN_TLS_PORT}?transport=udp`, ...creds }
+      );
+    }
+  }
+  return servers;
 }
 
-// Async wrapper kept for API compatibility with the join-room handler
-async function fetchMeteredIceServers(userId = 'meetspace') {
-  return buildIceServers(userId);
+// ─── MEDIASOUP SETUP ─────────────────────────────────────────────────────────
+// mediasoup media codecs supported by the SFU router
+const mediaCodecs = [
+  { kind: 'audio', mimeType: 'audio/opus',   clockRate: 48000, channels: 2 },
+  { kind: 'video', mimeType: 'video/VP8',    clockRate: 90000, parameters: {} },
+  { kind: 'video', mimeType: 'video/VP9',    clockRate: 90000, parameters: { 'profile-id': 2 } },
+  { kind: 'video', mimeType: 'video/h264',   clockRate: 90000,
+    parameters: { 'packetization-mode': 1, 'profile-level-id': '42e01f', 'level-asymmetry-allowed': 1 } },
+];
+
+// WebRtcTransport options — used for both send and recv transports
+const webRtcTransportOptions = {
+  listenIps: [
+    { ip: '0.0.0.0', announcedIp: process.env.MEDIASOUP_ANNOUNCED_IP || '127.0.0.1' },
+  ],
+  enableUdp: true,
+  enableTcp: true,
+  preferUdp: true,
+  initialAvailableOutgoingBitrate: 1000000,
+};
+
+let worker; // single mediasoup Worker
+
+async function createWorker() {
+  worker = await mediasoup.createWorker({
+    logLevel: 'warn',
+    rtcMinPort: 40000,
+    rtcMaxPort: 49999,
+  });
+  worker.on('died', () => {
+    console.error('[mediasoup] Worker died — restarting in 2s');
+    setTimeout(createWorker, 2000);
+  });
+  console.log('[mediasoup] Worker created, pid:', worker.pid);
 }
 
-console.log(`[TURN] Self-hosted coturn configured at ${TURN_HOST}:${TURN_PORT}`);
-console.log(`[TURN] ICE servers ready: ${buildIceServers().length} total`);
+// ─── ROOM STATE ──────────────────────────────────────────────────────────────
+// rooms: Map<roomId, {
+//   id, createdAt, messages[],
+//   router: mediasoup.Router,
+//   peers: Map<socketId, {
+//     id, name, audioEnabled, videoEnabled, isScreenSharing, handRaised,
+//     joinedAt,
+//     sendTransport: Transport|null,
+//     recvTransport: Transport|null,
+//     producers: Map<producerId, Producer>,
+//     consumers: Map<consumerId, Consumer>,
+//   }>
+// }>
+const rooms = new Map();
+const MAX_PEERS = 10;
 
-// Configure CORS — allow production domain + localhost for development
+async function getOrCreateRoom(roomId) {
+  if (!rooms.has(roomId)) {
+    const router = await worker.createRouter({ mediaCodecs });
+    rooms.set(roomId, {
+      id: roomId,
+      createdAt: new Date().toISOString(),
+      messages: [],
+      router,
+      peers: new Map(),
+    });
+    console.log(`[Room] Created room ${roomId}, routerId=${router.id}`);
+  }
+  return rooms.get(roomId);
+}
+
+// ─── RATE LIMITER ─────────────────────────────────────────────────────────────
+const rateLimitMap = new Map();
+function rateLimit(req, res, next) {
+  const ip  = req.ip || req.socket.remoteAddress;
+  const now = Date.now();
+  const e   = rateLimitMap.get(ip) || { count: 0, start: now };
+  if (now - e.start > 60000) { e.count = 1; e.start = now; }
+  else e.count++;
+  rateLimitMap.set(ip, e);
+  if (e.count > 60) return res.status(429).json({ error: 'Too many requests' });
+  next();
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, e] of rateLimitMap) if (now - e.start > 120000) rateLimitMap.delete(ip);
+}, 300000);
+
+// ─── EXPRESS MIDDLEWARE ───────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  next();
+});
 app.use(cors({
-  origin: (origin, callback) => {
-    if (isOriginAllowed(origin)) return callback(null, true);
-    callback(new Error(`CORS: origin ${origin} not allowed`));
-  },
-  methods: ['GET', 'POST'],
-  credentials: true
+  origin: (origin, cb) => isOriginAllowed(origin) ? cb(null, true) : cb(new Error('CORS blocked')),
+  methods: ['GET', 'POST'], credentials: true,
 }));
-
 app.use(express.json({ limit: '10kb' }));
 app.use(rateLimit);
 
-// Socket.io setup
+// ─── REST API ─────────────────────────────────────────────────────────────────
+app.get('/health', (req, res) => res.json({
+  status: 'ok', timestamp: new Date().toISOString(),
+  rooms: rooms.size, mediasoup: !!worker,
+}));
+
+app.get('/api/ice-servers', (req, res) => res.json({ iceServers: buildIceServers() }));
+
+app.post('/api/rooms/create', (req, res) => {
+  const roomId = uuidv4().substring(0, 8).toUpperCase();
+  res.json({ roomId });
+});
+
+app.get('/api/rooms/:roomId', (req, res) => {
+  const room = rooms.get(req.params.roomId);
+  if (!room) return res.status(404).json({ error: 'Room not found' });
+  res.json({
+    id: room.id, createdAt: room.createdAt,
+    participantCount: room.peers.size,
+    participants: Array.from(room.peers.values()).map(p => ({
+      id: p.id, name: p.name, audioEnabled: p.audioEnabled,
+      videoEnabled: p.videoEnabled, isScreenSharing: p.isScreenSharing,
+    })),
+  });
+});
+
+// ─── SOCKET.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, {
   cors: {
-    origin: (origin, callback) => {
-      if (isOriginAllowed(origin)) return callback(null, true);
-      callback(new Error(`CORS: origin ${origin} not allowed`));
-    },
-    methods: ['GET', 'POST'],
-    credentials: true
+    origin: (origin, cb) => isOriginAllowed(origin) ? cb(null, true) : cb(new Error('CORS blocked')),
+    methods: ['GET', 'POST'], credentials: true,
   },
   pingTimeout: 60000,
   pingInterval: 25000,
 });
 
-// In-memory store for rooms
-// Room structure:
-// {
-//   id, createdAt, messages[],
-//   participants: Map<socketId, { id, name, joinedAt, audioEnabled, videoEnabled, isScreenSharing, handRaised }>
-// }
-const rooms = new Map();
-
-// Maximum participants per room — beyond this, new joins are rejected.
-// 10 peers = 45 peer connections total (n*(n-1)/2), which is manageable.
-const MAX_PARTICIPANTS_PER_ROOM = 10;
-
-function getOrCreateRoom(roomId) {
-  if (!rooms.has(roomId)) {
-    rooms.set(roomId, {
-      id: roomId,
-      participants: new Map(),
-      messages: [],
-      createdAt: new Date().toISOString()
-    });
-  }
-  return rooms.get(roomId);
+// Helper: close and clean up all mediasoup resources for a peer
+async function cleanupPeer(room, socketId) {
+  const peer = room.peers.get(socketId);
+  if (!peer) return;
+  for (const consumer of peer.consumers.values()) { try { consumer.close(); } catch (_) {} }
+  for (const producer of peer.producers.values()) { try { producer.close(); } catch (_) {} }
+  if (peer.recvTransport) { try { peer.recvTransport.close(); } catch (_) {} }
+  if (peer.sendTransport) { try { peer.sendTransport.close(); } catch (_) {} }
+  room.peers.delete(socketId);
 }
-
-// Validate that an SDP object has the required fields
-function isValidSdp(sdp) {
-  return sdp && typeof sdp.type === 'string' && typeof sdp.sdp === 'string' && sdp.sdp.length > 0;
-}
-
-// Validate ICE candidate object
-function isValidCandidate(candidate) {
-  return candidate && (typeof candidate.candidate === 'string' || candidate.candidate === '');
-}
-
-// ─── REST API ────────────────────────────────────────────────────────────────
-
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    rooms: rooms.size,
-    iceServers: buildIceServers().length,
-  });
-});
-
-// Return ICE server config to clients (so TURN credentials stay server-side)
-app.get('/api/ice-servers', (req, res) => {
-  res.json({ iceServers: buildIceServers() });
-});
-
-app.get('/api/rooms', (req, res) => {
-  const roomList = Array.from(rooms.values()).map(room => ({
-    id: room.id,
-    participantCount: room.participants.size,
-    createdAt: room.createdAt
-  }));
-  res.json(roomList);
-});
-
-app.post('/api/rooms/create', (req, res) => {
-  const roomId = uuidv4().substring(0, 8).toUpperCase();
-  getOrCreateRoom(roomId);
-  res.json({ roomId });
-});
-
-app.get('/api/rooms/:roomId', (req, res) => {
-  const { roomId } = req.params;
-  const room = rooms.get(roomId);
-  if (!room) return res.status(404).json({ error: 'Room not found' });
-
-  res.json({
-    id: room.id,
-    participantCount: room.participants.size,
-    participants: Array.from(room.participants.values()).map(p => ({
-      id: p.id,
-      name: p.name,
-      joinedAt: p.joinedAt,
-      audioEnabled: p.audioEnabled,
-      videoEnabled: p.videoEnabled,
-      isScreenSharing: p.isScreenSharing,
-      handRaised: p.handRaised,
-    })),
-    createdAt: room.createdAt
-  });
-});
-
-// ─── SOCKET.IO SIGNALING ─────────────────────────────────────────────────────
 
 io.on('connection', (socket) => {
   console.log(`[Socket] Connected: ${socket.id}`);
 
-  // Middleware: rate limit all socket events
-  socket.use(([event, ...args], next) => {
-    if (!socketRateLimit(socket.id)) {
-      console.warn(`[RateLimit] Socket ${socket.id} exceeded event rate limit`);
-      return; // silently drop
-    }
-    next();
-  });
-
   // ── JOIN ROOM ──────────────────────────────────────────────────────────────
   socket.on('join-room', async ({ roomId, userName, audioEnabled: initAudio, videoEnabled: initVideo }) => {
-    if (!roomId || !userName) return;
-    // Sanitize inputs
-    const safeRoomId = String(roomId).trim().substring(0, 50).replace(/[^a-zA-Z0-9_-]/g, '');
-    const safeUserName = String(userName).trim().substring(0, 30);
-    if (!safeRoomId || !safeUserName) return;
-    roomId = safeRoomId;
-    userName = safeUserName;
+    try {
+      if (!roomId || !userName) return;
+      const safeRoomId   = String(roomId).trim().substring(0, 50).replace(/[^a-zA-Z0-9_-]/g, '');
+      const safeUserName = String(userName).trim().substring(0, 30);
+      if (!safeRoomId || !safeUserName) return;
 
-    const room = getOrCreateRoom(roomId);
+      const room = await getOrCreateRoom(safeRoomId);
 
-    // If this socket is already in the room (reconnect scenario), remove the old entry first
-    // so the participant list stays clean and the new socket ID is used.
-    if (room.participants.has(socket.id)) {
-      room.participants.delete(socket.id);
-      console.log(`[Room] Re-join detected for ${socket.id} in room ${roomId} — refreshing entry`);
+      if (room.peers.size >= MAX_PEERS) {
+        socket.emit('room-full', { roomId: safeRoomId, max: MAX_PEERS });
+        return;
+      }
+
+      // Prevent duplicate joins from same socket
+      if (socket.roomId === safeRoomId && room.peers.has(socket.id)) {
+        console.warn(`[join-room] Duplicate join ignored for socket ${socket.id} in room ${safeRoomId}`);
+        return;
+      }
+
+      // Clean up stale entry if reconnecting from a different room
+      if (room.peers.has(socket.id)) await cleanupPeer(room, socket.id);
+
+      const peer = {
+        id: socket.id,
+        name: safeUserName,
+        joinedAt: new Date().toISOString(),
+        audioEnabled: initAudio !== false,
+        videoEnabled: initVideo !== false,
+        isScreenSharing: false,
+        handRaised: false,
+        sendTransport: null,
+        recvTransport: null,
+        producers: new Map(),
+        consumers: new Map(),
+      };
+      room.peers.set(socket.id, peer);
+      socket.join(safeRoomId);
+      socket.roomId   = safeRoomId;
+      socket.userName = safeUserName;
+
+      // Existing peers info for the new joiner
+      const existingPeers = Array.from(room.peers.values())
+        .filter(p => p.id !== socket.id)
+        .map(p => ({
+          id: p.id, name: p.name,
+          audioEnabled: p.audioEnabled, videoEnabled: p.videoEnabled,
+          isScreenSharing: p.isScreenSharing, handRaised: p.handRaised,
+          producers: Array.from(p.producers.values()).map(pr => ({
+            producerId: pr.id, kind: pr.kind,
+          })),
+        }));
+
+      socket.emit('room-joined', {
+        roomId: safeRoomId,
+        routerRtpCapabilities: room.router.rtpCapabilities,
+        participants: existingPeers,
+        chatHistory: room.messages.slice(-50),
+        iceServers: buildIceServers(socket.id),
+      });
+
+      socket.to(safeRoomId).emit('user-joined', {
+        userId: socket.id, userName: safeUserName,
+        audioEnabled: peer.audioEnabled, videoEnabled: peer.videoEnabled,
+        isScreenSharing: false, handRaised: false,
+      });
+
+      console.log(`[Room] "${safeUserName}" joined ${safeRoomId} (${room.peers.size} peers)`);
+    } catch (err) {
+      console.error('[join-room] error:', err);
     }
+  });
 
-    // Enforce room size limit to keep peer connections manageable
-    if (room.participants.size >= MAX_PARTICIPANTS_PER_ROOM) {
-      socket.emit('room-full', { roomId, max: MAX_PARTICIPANTS_PER_ROOM });
-      console.warn(`[Room] Room ${roomId} is full (${room.participants.size}/${MAX_PARTICIPANTS_PER_ROOM}), rejecting ${socket.id}`);
-      return;
+  // ── CREATE TRANSPORT ───────────────────────────────────────────────────────
+  // direction: 'send' | 'recv'
+  socket.on('create-transport', async ({ direction }, callback) => {
+    try {
+      const room = rooms.get(socket.roomId);
+      if (!room) { console.error(`[create-transport] Room not found for socket ${socket.id}, roomId=${socket.roomId}`); return callback({ error: 'Room not found' }); }
+      const peer = room.peers.get(socket.id);
+      if (!peer) { console.error(`[create-transport] Peer not found for socket ${socket.id}`); return callback({ error: 'Peer not found' }); }
+
+      const transport = await room.router.createWebRtcTransport(webRtcTransportOptions);
+
+      transport.on('dtlsstatechange', (state) => {
+        if (state === 'closed') transport.close();
+      });
+
+      // Store in per-socket map for instant lookup by ID
+      if (!socket._transports) socket._transports = new Map();
+      socket._transports.set(transport.id, transport);
+
+      if (direction === 'send') {
+        if (peer.sendTransport) peer.sendTransport.close();
+        peer.sendTransport = transport;
+      } else {
+        if (peer.recvTransport) peer.recvTransport.close();
+        peer.recvTransport = transport;
+      }
+
+      callback({
+        id: transport.id,
+        iceParameters:  transport.iceParameters,
+        iceCandidates:  transport.iceCandidates,
+        dtlsParameters: transport.dtlsParameters,
+      });
+    } catch (err) {
+      console.error('[create-transport] error:', err);
+      callback({ error: err.message });
     }
-
-    const participant = {
-      id: socket.id,
-      name: userName.trim() || `User-${socket.id.substring(0, 4)}`,
-      joinedAt: new Date().toISOString(),
-      // Accept actual initial media state from client so the participant list
-      // shown to late joiners reflects the real camera/mic state at join time.
-      audioEnabled: initAudio !== false, // default true unless explicitly false
-      videoEnabled: initVideo !== false, // default true unless explicitly false
-      isScreenSharing: false,
-      handRaised: false,
-    };
-
-    room.participants.set(socket.id, participant);
-    socket.join(roomId);
-    socket.roomId = roomId;
-    socket.userName = participant.name;
-
-    console.log(`[Room] "${participant.name}" joined room ${roomId} (${room.participants.size} total)`);
-
-    // Send existing participants + chat history + ICE config to the new user
-    const existingParticipants = Array.from(room.participants.values())
-      .filter(p => p.id !== socket.id)
-      .map(p => ({
-        id: p.id,
-        name: p.name,
-        audioEnabled: p.audioEnabled,
-        videoEnabled: p.videoEnabled,
-        isScreenSharing: p.isScreenSharing,
-        handRaised: p.handRaised,
-      }));
-
-    // Fetch fresh TURN credentials from Metered.ca (cached after first call)
-    const iceServers = await fetchMeteredIceServers();
-
-    socket.emit('room-joined', {
-      roomId,
-      participants: existingParticipants,
-      chatHistory: room.messages.slice(-50),
-      iceServers,   // ← send real TURN credentials on join
-    });
-
-    // Notify everyone else that a new user joined (with their initial state)
-    socket.to(roomId).emit('user-joined', {
-      userId: socket.id,
-      userName: participant.name,
-      audioEnabled: participant.audioEnabled,
-      videoEnabled: participant.videoEnabled,
-      isScreenSharing: participant.isScreenSharing,
-      handRaised: participant.handRaised,
-    });
   });
 
-  // ── WEBRTC SIGNALING ───────────────────────────────────────────────────────
-
-  // Offer: caller → callee (validate SDP before relaying)
-  socket.on('offer', ({ targetId, offer }) => {
-    if (!targetId || !isValidSdp(offer)) return;
-    if (offer.type !== 'offer') return; // must be an offer SDP
-    console.log(`[WebRTC] Offer: ${socket.id} → ${targetId}`);
-    io.to(targetId).emit('offer', {
-      fromId: socket.id,
-      fromName: socket.userName,
-      offer,
-    });
+  // ── CONNECT TRANSPORT ──────────────────────────────────────────────────────
+  socket.on('connect-transport', async ({ transportId, dtlsParameters }, callback) => {
+    try {
+      // Look up transport in the global transports map (avoids peer timing issues)
+      const transport = socket._transports?.get(transportId);
+      if (!transport) {
+        console.error(`[connect-transport] Transport ${transportId} not found for socket ${socket.id}`);
+        return callback({ error: 'Transport not found' });
+      }
+      await transport.connect({ dtlsParameters });
+      callback({});
+    } catch (err) {
+      console.error('[connect-transport] error:', err);
+      callback({ error: err.message });
+    }
   });
 
-  // Answer: callee → caller (validate SDP before relaying)
-  socket.on('answer', ({ targetId, answer }) => {
-    if (!targetId || !isValidSdp(answer)) return;
-    if (answer.type !== 'answer') return; // must be an answer SDP
-    console.log(`[WebRTC] Answer: ${socket.id} → ${targetId}`);
-    io.to(targetId).emit('answer', {
-      fromId: socket.id,
-      answer,
-    });
+  // ── PRODUCE ────────────────────────────────────────────────────────────────
+  socket.on('produce', async ({ transportId, kind, rtpParameters, appData }, callback) => {
+    try {
+      const room = rooms.get(socket.roomId);
+      if (!room) return callback({ error: 'Room not found' });
+      const peer = room.peers.get(socket.id);
+      if (!peer) return callback({ error: 'Peer not found' });
+
+      // Look up send transport from socket's transport map
+      const transport = socket._transports?.get(transportId);
+      if (!transport) return callback({ error: 'Send transport not found' });
+
+      const producer = await transport.produce({ kind, rtpParameters, appData });
+      peer.producers.set(producer.id, producer);
+
+      producer.on('transportclose', () => {
+        producer.close();
+        peer.producers.delete(producer.id);
+      });
+
+      // Notify all other peers in the room about the new producer
+      socket.to(socket.roomId).emit('new-producer', {
+        producerId: producer.id,
+        producerSocketId: socket.id,
+        kind,
+        appData,
+      });
+
+      callback({ id: producer.id });
+    } catch (err) {
+      console.error('[produce] error:', err);
+      callback({ error: err.message });
+    }
   });
 
-  // ICE Candidate: trickle ICE relay (validate candidate before relaying)
-  socket.on('ice-candidate', ({ targetId, candidate }) => {
-    if (!targetId || !isValidCandidate(candidate)) return;
-    io.to(targetId).emit('ice-candidate', {
-      fromId: socket.id,
-      candidate,
-    });
+  // ── CONSUME ────────────────────────────────────────────────────────────────
+  socket.on('consume', async ({ producerId, producerSocketId, rtpCapabilities }, callback) => {
+    try {
+      const room = rooms.get(socket.roomId);
+      if (!room) return callback({ error: 'Room not found' });
+      const peer = room.peers.get(socket.id);
+      if (!peer || !peer.recvTransport) return callback({ error: 'Recv transport not found' });
+
+      if (!room.router.canConsume({ producerId, rtpCapabilities }))
+        return callback({ error: 'Cannot consume' });
+
+      const consumer = await peer.recvTransport.consume({
+        producerId, rtpCapabilities, paused: false,
+      });
+      peer.consumers.set(consumer.id, consumer);
+
+      consumer.on('transportclose', () => { consumer.close(); peer.consumers.delete(consumer.id); });
+      consumer.on('producerclose', () => {
+        consumer.close();
+        peer.consumers.delete(consumer.id);
+        socket.emit('producer-closed', { consumerId: consumer.id, producerSocketId });
+      });
+
+      callback({
+        id:            consumer.id,
+        producerId:    consumer.producerId,
+        kind:          consumer.kind,
+        rtpParameters: consumer.rtpParameters,
+      });
+    } catch (err) {
+      console.error('[consume] error:', err);
+      callback({ error: err.message });
+    }
   });
 
-  // ── STATE SYNC ─────────────────────────────────────────────────────────────
+  // ── PRODUCER CLOSED (client side) ─────────────────────────────────────────
+  socket.on('producer-closed', ({ producerId }) => {
+    const room = rooms.get(socket.roomId);
+    if (!room) return;
+    const peer = room.peers.get(socket.id);
+    if (!peer) return;
+    const producer = peer.producers.get(producerId);
+    if (producer) { producer.close(); peer.producers.delete(producerId); }
+  });
 
-  // Mute / unmute / video on / off
+  // ── MEDIA STATE ────────────────────────────────────────────────────────────
   socket.on('media-state-change', ({ roomId, audioEnabled, videoEnabled }) => {
     const room = rooms.get(roomId);
     if (!room) return;
-
-    // Persist state on server
-    const participant = room.participants.get(socket.id);
-    if (participant) {
-      participant.audioEnabled = audioEnabled;
-      participant.videoEnabled = videoEnabled;
-    }
-
-    // Broadcast to everyone else in the room
+    const peer = room.peers.get(socket.id);
+    if (peer) { peer.audioEnabled = audioEnabled; peer.videoEnabled = videoEnabled; }
     socket.to(roomId).emit('user-media-state-change', {
-      userId: socket.id,
-      userName: socket.userName,
-      audioEnabled,
-      videoEnabled,
+      userId: socket.id, userName: socket.userName, audioEnabled, videoEnabled,
     });
-
-    console.log(`[State] ${socket.userName} audio=${audioEnabled} video=${videoEnabled}`);
   });
 
-  // Screen share started / stopped
   socket.on('screen-share-state', ({ roomId, isSharing }) => {
     const room = rooms.get(roomId);
     if (!room) return;
-
-    const participant = room.participants.get(socket.id);
-    if (participant) participant.isScreenSharing = isSharing;
-
+    const peer = room.peers.get(socket.id);
+    if (peer) peer.isScreenSharing = isSharing;
     socket.to(roomId).emit('user-screen-share-state', {
-      userId: socket.id,
-      userName: socket.userName,
-      isSharing,
+      userId: socket.id, userName: socket.userName, isSharing,
     });
-
-    console.log(`[State] ${socket.userName} screen-share=${isSharing}`);
   });
 
-  // Raise / lower hand
   socket.on('raise-hand', ({ roomId, raised }) => {
     const room = rooms.get(roomId);
     if (!room) return;
-
-    const participant = room.participants.get(socket.id);
-    if (participant) participant.handRaised = raised;
-
+    const peer = room.peers.get(socket.id);
+    if (peer) peer.handRaised = raised;
     socket.to(roomId).emit('user-raise-hand', {
-      userId: socket.id,
-      userName: socket.userName,
-      raised,
+      userId: socket.id, userName: socket.userName, raised,
     });
-
-    console.log(`[State] ${socket.userName} hand-raised=${raised}`);
   });
 
   // ── CHAT ───────────────────────────────────────────────────────────────────
-
   socket.on('chat-message', ({ roomId, message }) => {
     const room = rooms.get(roomId);
     if (!room || !message?.trim()) return;
-
-    // Sanitize message
-    const safeMessage = String(message).trim().substring(0, 500);
-    if (!safeMessage) return;
-
+    const safeMsg = String(message).trim().substring(0, 500);
+    if (!safeMsg) return;
     const msgObj = {
-      id: uuidv4(),
-      userId: socket.id,
-      userName: socket.userName,
-      message: safeMessage,
-      timestamp: new Date().toISOString(),
+      id: uuidv4(), userId: socket.id, userName: socket.userName,
+      message: safeMsg, timestamp: new Date().toISOString(),
     };
-
     room.messages.push(msgObj);
-    if (room.messages.length > 200) {
-      room.messages = room.messages.slice(-200);
-    }
-
-    // Broadcast to ALL in room (including sender for confirmation)
+    if (room.messages.length > 200) room.messages = room.messages.slice(-200);
     io.to(roomId).emit('chat-message', msgObj);
   });
 
   // ── DISCONNECT ─────────────────────────────────────────────────────────────
-
-  socket.on('disconnect', (reason) => {
-    socketRateLimitMap.delete(socket.id);
+  socket.on('disconnect', async (reason) => {
     console.log(`[Socket] Disconnected: ${socket.id} (${reason})`);
-
     const roomId = socket.roomId;
     if (!roomId) return;
-
     const room = rooms.get(roomId);
     if (!room) return;
-
-    room.participants.delete(socket.id);
-
-    // Notify remaining participants
-    socket.to(roomId).emit('user-left', {
-      userId: socket.id,
-      userName: socket.userName,
-    });
-
-    console.log(`[Room] "${socket.userName}" left room ${roomId} (${room.participants.size} remaining)`);
-
-    // Clean up empty rooms after 5 minutes
-    if (room.participants.size === 0) {
+    await cleanupPeer(room, socket.id);
+    socket.to(roomId).emit('user-left', { userId: socket.id, userName: socket.userName });
+    console.log(`[Room] "${socket.userName}" left ${roomId} (${room.peers.size} remaining)`);
+    if (room.peers.size === 0) {
       setTimeout(() => {
         const r = rooms.get(roomId);
-        if (r && r.participants.size === 0) {
+        if (r && r.peers.size === 0) {
+          r.router.close();
           rooms.delete(roomId);
           console.log(`[Room] Cleaned up empty room: ${roomId}`);
         }
-      }, 5 * 60 * 1000);
+      }, 300000);
     }
   });
 });
 
-// ─── SERVE FRONTEND STATIC FILES (Production) ────────────────────────────────
-// Supports multiple deployment layouts:
-//   1. app.js at repo root → frontend/dist/ (new Plesk Git layout)
-//   2. app.js in backend/  → dist/ next to app.js (old flat layout)
-//   3. app.js in backend/  → ../frontend/dist/ (old nested layout)
-const frontendDistInline  = path.join(__dirname, 'frontend', 'dist');  // layout 1
-const frontendDistFlat    = path.join(__dirname, 'dist');               // layout 2
-const frontendDistNested  = path.join(__dirname, '..', 'frontend', 'dist'); // layout 3
+// ─── SERVE FRONTEND ───────────────────────────────────────────────────────────
+const frontendDist = [
+  path.join(__dirname, 'frontend', 'dist'),
+  path.join(__dirname, 'dist'),
+  path.join(__dirname, '..', 'frontend', 'dist'),
+].find(p => fs.existsSync(p));
 
-const frontendDist = fs.existsSync(frontendDistInline)
-  ? frontendDistInline
-  : fs.existsSync(frontendDistFlat)
-    ? frontendDistFlat
-    : frontendDistNested;
-
-if (fs.existsSync(frontendDist)) {
+if (frontendDist) {
   app.use(express.static(frontendDist));
-  console.log(`📁 Serving frontend static files from: ${frontendDist}`);
+  console.log(`📁 Serving frontend from: ${frontendDist}`);
 }
 
-// SPA fallback: serve index.html for all non-API, non-health routes (must be last)
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api') || req.path === '/health') return next();
-  const indexFile = path.join(frontendDist, 'index.html');
-  if (fs.existsSync(indexFile)) {
-    res.sendFile(indexFile);
-  } else {
-    res.status(404).json({ error: 'Not found' });
-  }
+  const idx = frontendDist ? path.join(frontendDist, 'index.html') : null;
+  if (idx && fs.existsSync(idx)) return res.sendFile(idx);
+  res.status(404).json({ error: 'Not found' });
 });
 
-// ─── START SERVER ─────────────────────────────────────────────────────────────
+// ─── START ────────────────────────────────────────────────────────────────────
+async function start() {
+  await createWorker();
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`\n❌ Port ${PORT} is already in use.\n`);
+    } else {
+      console.error('Server error:', err);
+    }
+    process.exit(1);
+  });
+  server.listen(PORT, () => {
+    console.log(`\n🚀 MeetSpace SFU (mediasoup) running on port ${PORT}`);
+    console.log(`📡 Client URL: ${CLIENT_URL}`);
+    console.log(`🔗 Health: http://localhost:${PORT}/health\n`);
+  });
+}
 
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`\n❌ Port ${PORT} is already in use.`);
-    console.error(`   → Kill the existing process: npx kill-port ${PORT}`);
-    console.error(`   → Or set a different PORT in your .env file.\n`);
-  } else {
-    console.error('Server error:', err);
-  }
-  process.exit(1);
-});
-
-server.listen(PORT, () => {
-  console.log(`\n🚀 WebRTC Signaling Server running on port ${PORT}`);
-  console.log(`📡 Accepting connections from: ${CLIENT_URL}`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-  console.log(`🧊 TURN server: self-hosted coturn at ${TURN_HOST}:${TURN_PORT} (HMAC-SHA1 credentials)\n`);
-});
+start().catch(err => { console.error('Fatal startup error:', err); process.exit(1); });
