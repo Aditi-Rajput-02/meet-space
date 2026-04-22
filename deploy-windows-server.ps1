@@ -161,7 +161,7 @@ if ($healthy) {
     Write-Host ""
     Write-Host "  Next steps:" -ForegroundColor Yellow
     Write-Host "  1. In Plesk: configure Nginx reverse proxy → localhost:5001" -ForegroundColor White
-    Write-Host "  2. In Plesk: install Let's Encrypt SSL for your domain" -ForegroundColor White
+    Write-Host "  2. In Plesk: install Let`s Encrypt SSL for your domain" -ForegroundColor White
     Write-Host "  3. Test: https://meetconnect.swiftcampus.com" -ForegroundColor White
 } else {
     Write-Host "  ⚠️  App may still be starting. Check:" -ForegroundColor Yellow
