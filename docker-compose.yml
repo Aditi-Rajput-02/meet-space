@@ -1,0 +1,70 @@
+version: '3.8'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MeetSpace — Docker Compose for Windows Server
+#
+# ⚠️  IMPORTANT: network_mode: host does NOT work on Windows Docker.
+#     We use explicit port mapping instead.
+#
+# Usage:
+#   1. Copy .env to server and fill in values
+#   2. Run: docker compose up -d --build
+#
+# Required .env values:
+#   MEDIASOUP_ANNOUNCED_IP=<your server public IP>
+#   TURN_SECRET=<random secret>
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── coturn TURN Server ───────────────────────────────────────────────────────
+  coturn:
+    image: coturn/coturn:latest
+    container_name: meetspace-turn
+    restart: unless-stopped
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/udp"
+      - "5349:5349/tcp"
+      - "49152-65535:49152-65535/udp"   # TURN relay ports
+    command: >
+      -n
+      --log-file=stdout
+      --min-port=49152
+      --max-port=65535
+      --use-auth-secret
+      --static-auth-secret=${TURN_SECRET}
+      --realm=${TURN_REALM:-meetconnect.swiftcampus.com}
+      --external-ip=${MEDIASOUP_ANNOUNCED_IP}
+      --no-cli
+      --no-tls
+      --no-dtls
+    healthcheck:
+      test: ["CMD-SHELL", "echo ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── MeetSpace Node.js App (mediasoup SFU) ───────────────────────────────────
+  meetspace:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meetspace-app
+    restart: unless-stopped
+    ports:
+      - "5001:5001"                        # HTTP / WebSocket
+      - "40000-49999:40000-49999/udp"      # mediasoup WebRTC media ports
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      - coturn
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

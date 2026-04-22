@@ -95,8 +95,8 @@ let worker; // single mediasoup Worker
 async function createWorker() {
   worker = await mediasoup.createWorker({
     logLevel: 'warn',
-    rtcMinPort: 40000,
-    rtcMaxPort: 49999,
+    rtcMinPort: parseInt(process.env.MEDIASOUP_RTC_MIN_PORT || '40000', 10),
+    rtcMaxPort: parseInt(process.env.MEDIASOUP_RTC_MAX_PORT || '49999', 10),
   });
   worker.on('died', () => {
     console.error('[mediasoup] Worker died — restarting in 2s');

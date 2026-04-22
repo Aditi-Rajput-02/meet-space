@@ -147,8 +147,11 @@ const VideoGrid = ({
   isScreenSharing,
   handRaised,
 }) => {
-  const remoteEntries = Object.entries(remoteStreams)
-  const totalCount = 1 + remoteEntries.length
+  // Show a tile for EVERY remote participant, even if they have no stream yet.
+  // Server already excludes the local user from the participants list.
+  // This fixes the bug where users with video/audio OFF don't appear in the grid.
+  const remotePeers = participants   // all entries are remote peers
+  const totalCount = 1 + remotePeers.length
 
   const getGridClass = () => {
     if (totalCount === 1) return 'grid-1'
@@ -171,15 +174,14 @@ const VideoGrid = ({
         handRaised={handRaised}
       />
 
-      {/* Remote videos */}
-      {remoteEntries.map(([peerId, stream]) => {
-        const participant = participants.find(p => p.id === peerId) || {}
-        // Default videoEnabled/audioEnabled to true if not set (participant just joined)
+      {/* Remote videos — one tile per participant, stream may be null if they have no producers */}
+      {remotePeers.map((participant) => {
+        const stream = remoteStreams[participant.id] || null
         const pVideoEnabled = participant.videoEnabled !== undefined ? participant.videoEnabled : true
         const pAudioEnabled = participant.audioEnabled !== undefined ? participant.audioEnabled : true
         return (
           <VideoTile
-            key={peerId}
+            key={participant.id}
             stream={stream}
             userName={participant.name || 'Participant'}
             isLocal={false}

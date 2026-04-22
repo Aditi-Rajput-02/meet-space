@@ -29,9 +29,11 @@ const useWebRTC = (roomId, userName) => {
   const cameraTrackRef   = useRef(null)
   const videoBeforeShare = useRef(true)
 
-  const socketRef   = useRef(null)
-  const notifIdRef  = useRef(0)
-  const mountedRef  = useRef(true)
+  const socketRef          = useRef(null)
+  const notifIdRef         = useRef(0)
+  const mountedRef         = useRef(true)
+  const setupDoneRef       = useRef(false)   // true after transports + initial consume done
+  const pendingProducers   = useRef([])      // new-producer events queued before setup done
 
   // ── NOTIFICATIONS ──────────────────────────────────────────────────────────
   const addNotification = useCallback((message, type = 'info') => {
@@ -131,17 +133,24 @@ const useWebRTC = (roomId, userName) => {
 
   // ── CONSUME PRODUCER ───────────────────────────────────────────────────────
   const consumeProducer = useCallback(async (producerId, producerSocketId) => {
-    if (!recvTransportRef.current || !deviceRef.current) return
+    if (!recvTransportRef.current || !deviceRef.current) {
+      console.warn('[consume] skipped — recvTransport or device not ready', { recvTransport: !!recvTransportRef.current, device: !!deviceRef.current })
+      return
+    }
     try {
+      console.log(`[consume] requesting consume for producerId=${producerId} from peer=${producerSocketId}`)
       const params = await socketEmit('consume', {
         producerId,
         producerSocketId,
         rtpCapabilities: deviceRef.current.rtpCapabilities,
       })
+      console.log(`[consume] got params, consumerId=${params.id}, kind=${params.kind}`)
       const consumer = await recvTransportRef.current.consume(params)
       consumersRef.current[consumer.id] = consumer
 
       const track = consumer.track
+      console.log(`[consume] track received kind=${track.kind} readyState=${track.readyState} muted=${track.muted}`)
+
       setRemoteStreams(prev => {
         const existing = prev[producerSocketId]
         let stream
@@ -152,6 +161,7 @@ const useWebRTC = (roomId, userName) => {
         } else {
           stream = new MediaStream([track])
         }
+        console.log(`[consume] remoteStreams updated for peer=${producerSocketId}, tracks=${stream.getTracks().map(t=>t.kind).join(',')}`)
         return { ...prev, [producerSocketId]: stream }
       })
 
@@ -160,7 +170,7 @@ const useWebRTC = (roomId, userName) => {
       })
       return consumer
     } catch (err) {
-      console.error('[consume] error:', err)
+      console.error('[consume] error:', err.message, err)
     }
   }, [socketEmit])
 
@@ -208,9 +218,25 @@ const useWebRTC = (roomId, userName) => {
           socket.once('connect', doJoin)
         }
 
+        // 5. new-producer — queue if setup not done yet, consume immediately if ready
+        socket.on('new-producer', async ({ producerId, producerSocketId }) => {
+          if (!mountedRef.current) return
+          if (!setupDoneRef.current) {
+            // Setup still in progress — queue for later
+            pendingProducers.current.push({ producerId, producerSocketId })
+            console.log(`[new-producer] queued (setup not done): ${producerId} from ${producerSocketId}`)
+            return
+          }
+          console.log(`[new-producer] consuming immediately: ${producerId} from ${producerSocketId}`)
+          await consumeProducer(producerId, producerSocketId)
+        })
+
         // 3. room-joined → load device, create transports, produce, consume existing
         socket.once('room-joined', async ({ routerRtpCapabilities, participants: existing, chatHistory }) => {
           if (!mountedRef.current) return
+          setupDoneRef.current = false
+          pendingProducers.current = []
+
           setParticipants(existing)
           setMessages(chatHistory || [])
           setConnectionStatus('connected')
@@ -219,7 +245,7 @@ const useWebRTC = (roomId, userName) => {
           const device = await loadDevice(routerRtpCapabilities)
 
           // Create send + recv transports in parallel
-          const [, ] = await Promise.all([
+          await Promise.all([
             createSendTransport(device),
             createRecvTransport(device),
           ])
@@ -236,19 +262,26 @@ const useWebRTC = (roomId, userName) => {
               await consumeProducer(producerId, peer.id)
             }
           }
+
+          // Mark setup done, then drain any queued new-producer events
+          setupDoneRef.current = true
+          const queued = pendingProducers.current.splice(0)
+          console.log(`[room-joined] setup done. Draining ${queued.length} queued producers`)
+          for (const { producerId, producerSocketId } of queued) {
+            if (!mountedRef.current) break
+            await consumeProducer(producerId, producerSocketId)
+          }
         })
 
         // 4. New user joined
         socket.on('user-joined', ({ userId, userName: n, audioEnabled: a, videoEnabled: v, isScreenSharing: s, handRaised: h }) => {
           if (!mountedRef.current) return
-          setParticipants(prev => [...prev, { id: userId, name: n, audioEnabled: a !== false, videoEnabled: v !== false, isScreenSharing: s || false, handRaised: h || false }])
+          setParticipants(prev => {
+            // Avoid duplicate entries
+            if (prev.some(p => p.id === userId)) return prev
+            return [...prev, { id: userId, name: n, audioEnabled: a !== false, videoEnabled: v !== false, isScreenSharing: s || false, handRaised: h || false }]
+          })
           addNotification(`${n} joined the meeting`, 'success')
-        })
-
-        // 5. New producer from existing peer
-        socket.on('new-producer', async ({ producerId, producerSocketId }) => {
-          if (!mountedRef.current) return
-          await consumeProducer(producerId, producerSocketId)
         })
 
         // 6. Producer closed (remote peer stopped track)
@@ -297,6 +330,8 @@ const useWebRTC = (roomId, userName) => {
 
     return () => {
       mountedRef.current = false
+      setupDoneRef.current = false
+      pendingProducers.current = []
       // Close mediasoup resources
       Object.values(producersRef.current).forEach(p => { try { p.close() } catch (_) {} })
       Object.values(consumersRef.current).forEach(c => { try { c.close() } catch (_) {} })
