@@ -398,46 +398,75 @@ const useWebRTC = (roomId, userName) => {
     }
   }, [roomId, audioEnabled, videoEnabled, isScreenSharing, produceTrack])
 
+  // ── STOP SCREEN SHARE (internal helper, no stale closure issues) ───────────
+  const stopScreenShare = useCallback(async (restoreCamera) => {
+    // Stop all screen tracks
+    screenStreamRef.current?.getTracks().forEach(t => t.stop())
+    screenStreamRef.current = null
+
+    // Close and notify server about the screen video producer
+    const videoProducer = producersRef.current['video']
+    if (videoProducer) {
+      socketRef.current?.emit('producer-closed', { producerId: videoProducer.id })
+      videoProducer.close()
+      delete producersRef.current['video']
+    }
+
+    // Remove any lingering video tracks from local stream
+    localStreamRef.current?.getVideoTracks().forEach(t => { localStreamRef.current.removeTrack(t); t.stop() })
+
+    if (restoreCamera) {
+      try {
+        const ns = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } } })
+        const nt = ns.getVideoTracks()[0]
+        localStreamRef.current.addTrack(nt)
+        cameraTrackRef.current = nt
+        await produceTrack(nt, { kind: 'video' })
+        setVideoEnabled(true)
+        sessionStorage.setItem('videoEnabled', 'true')
+      } catch (_) {
+        setVideoEnabled(false)
+        sessionStorage.setItem('videoEnabled', 'false')
+      }
+    } else {
+      setVideoEnabled(false)
+      sessionStorage.setItem('videoEnabled', 'false')
+    }
+
+    setLocalStream(new MediaStream(localStreamRef.current?.getTracks() || []))
+    setIsScreenSharing(false)
+    socketRef.current?.emit('screen-share-state', { roomId, isSharing: false })
+    socketRef.current?.emit('media-state-change', {
+      roomId,
+      audioEnabled: localStreamRef.current?.getAudioTracks()[0]?.enabled ?? true,
+      videoEnabled: restoreCamera,
+    })
+    addNotification('Screen sharing stopped', 'info')
+  }, [roomId, addNotification, produceTrack])
+
   // ── TOGGLE SCREEN SHARE ────────────────────────────────────────────────────
   const toggleScreenShare = useCallback(async () => {
     if (isScreenSharing) {
-      // Stop screen share, restore camera
-      screenStreamRef.current?.getTracks().forEach(t => t.stop())
-      screenStreamRef.current = null
-      const videoProducer = producersRef.current['video']
-      if (videoProducer) { videoProducer.close(); delete producersRef.current['video'] }
-
-      if (videoBeforeShare.current) {
-        try {
-          const ns = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } } })
-          const nt = ns.getVideoTracks()[0]
-          localStreamRef.current.getVideoTracks().forEach(t => { localStreamRef.current.removeTrack(t); t.stop() })
-          localStreamRef.current.addTrack(nt)
-          cameraTrackRef.current = nt
-          await produceTrack(nt, { kind: 'video' })
-          setVideoEnabled(true)
-        } catch (_) { setVideoEnabled(false) }
-      } else {
-        localStreamRef.current.getVideoTracks().forEach(t => { localStreamRef.current.removeTrack(t); t.stop() })
-        setVideoEnabled(false)
-      }
-      setLocalStream(new MediaStream(localStreamRef.current.getTracks()))
-      setIsScreenSharing(false)
-      socketRef.current?.emit('screen-share-state', { roomId, isSharing: false })
-      addNotification('Screen sharing stopped', 'info')
+      await stopScreenShare(videoBeforeShare.current)
     } else {
       try {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
         screenStreamRef.current = screenStream
         const screenTrack = screenStream.getVideoTracks()[0]
+
+        // Save whether camera was on BEFORE screen share (before setVideoEnabled(true) is called)
         videoBeforeShare.current = videoEnabled
 
-        // Close existing video producer
+        // Close existing video producer and notify server
         const videoProducer = producersRef.current['video']
-        if (videoProducer) { videoProducer.close(); delete producersRef.current['video'] }
+        if (videoProducer) {
+          socketRef.current?.emit('producer-closed', { producerId: videoProducer.id })
+          videoProducer.close()
+          delete producersRef.current['video']
+        }
 
         // Swap video track in local stream
-        localStreamRef.current.getVideoTracks().forEach(t => { localStreamRef.current.removeTrack(t); t.stop() })
+        localStreamRef.current?.getVideoTracks().forEach(t => { localStreamRef.current.removeTrack(t); t.stop() })
         localStreamRef.current.addTrack(screenTrack)
         await produceTrack(screenTrack, { kind: 'video', screen: true })
 
@@ -447,7 +476,8 @@ const useWebRTC = (roomId, userName) => {
         socketRef.current?.emit('screen-share-state', { roomId, isSharing: true })
         addNotification('Screen sharing started', 'success')
 
-        screenTrack.onended = () => toggleScreenShare()
+        // When user clicks browser's built-in "Stop sharing" button
+        screenTrack.onended = () => stopScreenShare(videoBeforeShare.current)
       } catch (err) {
         if (err.name !== 'NotAllowedError') {
           console.error('[screenShare] error:', err)
@@ -455,7 +485,7 @@ const useWebRTC = (roomId, userName) => {
         }
       }
     }
-  }, [isScreenSharing, videoEnabled, roomId, addNotification, produceTrack])
+  }, [isScreenSharing, videoEnabled, roomId, addNotification, produceTrack, stopScreenShare])
 
   // ── RAISE HAND ─────────────────────────────────────────────────────────────
   const toggleRaiseHand = useCallback(() => {
