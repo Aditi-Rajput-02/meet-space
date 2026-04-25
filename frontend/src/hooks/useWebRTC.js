@@ -488,7 +488,6 @@ const useWebRTC = (roomId, userName) => {
     localStream, remoteStreams, participants, messages,
     audioEnabled, videoEnabled, isScreenSharing, handRaised,
     notifications, connectionStatus,
-    iceDebug: {},   // mediasoup handles ICE internally; kept for API compatibility
     toggleAudio, toggleVideo, toggleScreenShare, toggleRaiseHand,
     sendMessage, leaveRoom,
   }

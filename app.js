@@ -17,16 +17,7 @@ const server = http.createServer(app);
 const PORT       = process.env.PORT       || 5001;
 const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:3000';
 
-const ALLOWED_ORIGINS = [
-  CLIENT_URL,
-  'http://localhost:3000',
-  'http://localhost:5173',
-  'http://localhost:4173',
-  'http://127.0.0.1:3000',
-  'http://127.0.0.1:5173',
-];
-
-function isOriginAllowed(origin) {
+function isOriginAllowed() {
   return true; // Allow all origins
 }
 
